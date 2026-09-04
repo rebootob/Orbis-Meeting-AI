@@ -236,7 +236,11 @@ class OrbisMeetingController:
         self._emit_event("STATUS", f"WORKFLOW: Initialized at {paths.root.name}")
         return paths
 
-    def load_next_inbox_audio(self) -> Optional[AudioJobMetadata]:
+    def load_next_inbox_audio(
+        self,
+        check_interval_seconds: float = 1.0,
+        sleep_fn: Optional[Any] = None,
+    ) -> Optional[AudioJobMetadata]:
         """
         Discover, claim, and intake the next stable audio file from 01_Inbox.
         Sets job_origin = "WORKFLOW".
@@ -257,7 +261,8 @@ class OrbisMeetingController:
             job_dir, target_audio, metadata = claim_inbox_audio(
                 next_audio,
                 self.workflow_paths,
-                check_interval_seconds=0.0,
+                check_interval_seconds=check_interval_seconds,
+                sleep_fn=sleep_fn,
             )
             self.job_origin = "WORKFLOW"
             self.current_workflow_job_dir = job_dir
@@ -272,14 +277,17 @@ class OrbisMeetingController:
             self._emit_event("STATUS", f"WORKFLOW: Claimed {metadata.filename} into 02_Processing.")
             return metadata
         except Exception as e:
-            fail_workflow_job(
-                paths=self.workflow_paths,
-                job_id="unknown",
-                audio_filename=next_audio.name,
-                audio_path=next_audio,
-                stage="Claim/Intake",
-                error_message=str(e),
-            )
+            # If claim failed after file was partially touched or on error, fail safely if created
+            if 'job_dir' in locals() and job_dir and job_dir.exists():
+                fail_workflow_job(
+                    paths=self.workflow_paths,
+                    job_id=next_audio.stem,
+                    audio_filename=next_audio.name,
+                    audio_path=target_audio if 'target_audio' in locals() else next_audio,
+                    job_dir=job_dir,
+                    stage="Claim/Intake",
+                    error_message=str(e),
+                )
             raise DriveWorkflowError(f"Failed to claim Inbox audio: {e}") from e
 
     def complete_workflow_job(self, template_name: str = "General Meeting") -> ExportPackageResult:
@@ -302,6 +310,11 @@ class OrbisMeetingController:
             paths=self.workflow_paths,
             template_name=template_name,
         )
+
+        # Clear workflow job tracking so duplicate Complete calls are rejected
+        self.current_workflow_job_dir = None
+        self.current_workflow_audio_path = None
+        self.job_origin = "MANUAL"
 
         self._emit_event("WORKFLOW_COMPLETED", result)
         self._emit_event("STATUS", "WORKFLOW: Saved to local Google Drive sync folder (03_Completed).")
@@ -348,10 +361,36 @@ class OrbisMeetingController:
             self._emit_event("COMPLETE", None)
         except (TranscriptionError, TextCleanupError) as e:
             self.is_processing = False
+            if self.job_origin == "WORKFLOW" and self.workflow_paths:
+                fail_workflow_job(
+                    paths=self.workflow_paths,
+                    job_id=metadata.job_id,
+                    audio_filename=metadata.filename,
+                    audio_path=self.current_workflow_audio_path,
+                    job_dir=self.current_workflow_job_dir,
+                    stage="Transcription/Cleanup",
+                    error_message=str(e),
+                )
+                self.current_workflow_job_dir = None
+                self.current_workflow_audio_path = None
+                self.job_origin = "MANUAL"
             self._set_error(f"Processing Error: {e}")
             self._emit_event("COMPLETE", None)
         except Exception as e:
             self.is_processing = False
+            if self.job_origin == "WORKFLOW" and self.workflow_paths:
+                fail_workflow_job(
+                    paths=self.workflow_paths,
+                    job_id=metadata.job_id if metadata else "unknown",
+                    audio_filename=metadata.filename if metadata else "unknown",
+                    audio_path=self.current_workflow_audio_path,
+                    job_dir=self.current_workflow_job_dir,
+                    stage="Unexpected Error",
+                    error_message=str(e),
+                )
+                self.current_workflow_job_dir = None
+                self.current_workflow_audio_path = None
+                self.job_origin = "MANUAL"
             self._set_error(f"Unexpected Error: {e}")
             self._emit_event("COMPLETE", None)
 

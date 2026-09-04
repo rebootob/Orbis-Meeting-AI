@@ -155,7 +155,8 @@ def is_file_stable(
 def claim_inbox_audio(
     audio_path: Union[str, Path],
     paths: DriveWorkflowPaths,
-    check_interval_seconds: float = 0.0,
+    check_interval_seconds: float = 1.0,
+    sleep_fn: Optional[Any] = None,
 ) -> Tuple[Path, Path, AudioJobMetadata]:
     """
     Claim a stable audio file from 01_Inbox into 02_Processing.
@@ -170,7 +171,10 @@ def claim_inbox_audio(
     if not src_path.exists() or not src_path.is_file():
         raise DriveWorkflowError(f"Inbox audio file does not exist: {src_path}")
 
-    if not is_file_stable(src_path, check_interval_seconds=check_interval_seconds):
+    if src_path.parent.resolve() != paths.inbox.resolve():
+        raise DriveWorkflowError(f"Audio file '{src_path.name}' is not located directly inside 01_Inbox.")
+
+    if not is_file_stable(src_path, check_interval_seconds=check_interval_seconds, sleep_fn=sleep_fn):
         raise DriveWorkflowError(f"Inbox audio file is not stable or still syncing: {src_path.name}")
 
     try:
@@ -224,20 +228,26 @@ def complete_workflow_job(
     if not paths.completed.exists():
         raise DriveWorkflowError(f"Completed workflow directory missing: {paths.completed}")
 
-    # Export WP-006 package into 03_Completed
-    export_res = export_meeting_package(
-        output_parent=paths.completed,
-        metadata=metadata,
-        transcript_result=transcript_result,
-        summary_result=summary_result,
-        template_name=template_name,
-    )
+    try:
+        # Export WP-006 package into 03_Completed
+        export_res = export_meeting_package(
+            output_parent=paths.completed,
+            metadata=metadata,
+            transcript_result=transcript_result,
+            summary_result=summary_result,
+            template_name=template_name,
+        )
+    except Exception as e:
+        raise DriveWorkflowError(f"Failed to create completed meeting package: {e}") from e
 
     # Move workflow-owned audio file into completed package directory
     if target_audio_path and target_audio_path.exists():
         dest_audio_path = export_res.package_dir / target_audio_path.name
         if not dest_audio_path.exists():
-            shutil.move(str(target_audio_path), str(dest_audio_path))
+            try:
+                shutil.move(str(target_audio_path), str(dest_audio_path))
+            except Exception as e:
+                raise DriveWorkflowError(f"Failed to move audio to completed package: {e}") from e
 
             # Update audio_reference.json with final completed audio path
             audio_ref_file = export_res.audio_reference_path
@@ -249,10 +259,10 @@ def complete_workflow_job(
                         json.dumps(ref_data, ensure_ascii=False, indent=2),
                         encoding="utf-8",
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    raise DriveWorkflowError(f"Failed to update audio reference in completed package: {e}") from e
 
-    # Clean up processing job directory
+    # Clean up processing job directory ONLY AFTER all finalization steps succeed
     if job_dir and job_dir.exists() and job_dir.is_dir():
         try:
             shutil.rmtree(job_dir)

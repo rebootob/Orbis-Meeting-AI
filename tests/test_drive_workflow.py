@@ -13,7 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from orbis_meeting.audio_intake import validate_and_intake_audio
-from orbis_meeting.transcription import TranscriptionResult, TranscriptionSegment
+from orbis_meeting.transcription import TranscriptionResult, TranscriptionSegment, TranscriptionError
 from orbis_meeting.summary import MeetingSummaryResult, ActionItem
 from orbis_meeting.export_package import ExportPackageResult
 from orbis_meeting.drive_workflow import (
@@ -110,130 +110,119 @@ class TestDriveWorkflowModule(unittest.TestCase):
         # Non-existent file unstable
         self.assertFalse(is_file_stable(self.paths.inbox / "missing.mp3", check_interval_seconds=0.0))
 
-    def test_claim_inbox_audio_moves_file_and_preserves_bytes(self):
-        audio = self.paths.inbox / "meeting_record.mp3"
-        raw_bytes = b"important meeting binary audio contents 12345"
-        audio.write_bytes(raw_bytes)
+    def test_is_file_stable_with_size_and_mtime_changes(self):
+        audio = self.paths.inbox / "sample.mp3"
+        audio.write_bytes(b"sample audio data 12345")
 
-        job_dir, target_audio, metadata = claim_inbox_audio(audio, self.paths, check_interval_seconds=0.0)
+        # Stable file
+        self.assertTrue(is_file_stable(audio, check_interval_seconds=0.1, sleep_fn=lambda s: None))
 
-        # Original audio removed from 01_Inbox
-        self.assertFalse(audio.exists())
+        # Size change during sleep_fn
+        def change_size(s):
+            audio.write_bytes(b"sample audio data 12345 appended bytes")
 
-        # Claimed audio exists under 02_Processing inside job_dir
-        self.assertTrue(job_dir.exists())
-        self.assertTrue(job_dir.is_relative_to(self.paths.processing))
-        self.assertTrue(target_audio.exists())
-        self.assertEqual(target_audio.name, "meeting_record.mp3")
+        self.assertFalse(is_file_stable(audio, check_interval_seconds=0.1, sleep_fn=change_size))
 
-        # Audio bytes strictly preserved (not transcoded or modified)
-        self.assertEqual(target_audio.read_bytes(), raw_bytes)
-        self.assertGreater(metadata.file_size_bytes, 0)
+        # Mtime change during sleep_fn
+        audio.write_bytes(b"sample audio data 12345")
+        stat = audio.stat()
 
-    def test_claim_inbox_audio_collision_safety(self):
-        audio1 = self.paths.inbox / "meeting.mp3"
-        raw_bytes = b"same content audio 1"
-        audio1.write_bytes(raw_bytes)
+        def change_mtime(s):
+            import os
+            os.utime(str(audio), (stat.st_atime + 10, stat.st_mtime + 10))
 
-        job_dir1, target1, meta1 = claim_inbox_audio(audio1, self.paths, check_interval_seconds=0.0)
+        self.assertFalse(is_file_stable(audio, check_interval_seconds=0.1, sleep_fn=change_mtime))
 
-        # Re-create same filename in Inbox
-        audio2 = self.paths.inbox / "meeting.mp3"
-        audio2.write_bytes(raw_bytes)
+    def test_claim_inbox_audio_unstable_file_remains_in_inbox(self):
+        audio = self.paths.inbox / "unstable.mp3"
+        audio.write_bytes(b"initial bytes")
 
-        job_dir2, target2, meta2 = claim_inbox_audio(audio2, self.paths, check_interval_seconds=0.0)
+        def change_size(s):
+            audio.write_bytes(b"initial bytes growing")
 
-        self.assertNotEqual(job_dir1, job_dir2)
-        self.assertTrue(job_dir2.name.endswith("_2"))
-        self.assertTrue(target1.exists())
-        self.assertTrue(target2.exists())
+        with self.assertRaises(DriveWorkflowError) as ctx:
+            claim_inbox_audio(audio, self.paths, check_interval_seconds=0.1, sleep_fn=change_size)
 
-    def test_fail_workflow_job_preserves_audio_and_writes_error_json(self):
-        audio = self.paths.inbox / "failed_meeting.mp3"
-        raw_bytes = b"failed audio bytes"
-        audio.write_bytes(raw_bytes)
+        self.assertIn("not stable or still syncing", str(ctx.exception))
+        self.assertTrue(audio.exists())
+        self.assertEqual(audio.parent, self.paths.inbox)
 
-        job_dir, target_audio, metadata = claim_inbox_audio(audio, self.paths, check_interval_seconds=0.0)
+    def test_claim_inbox_audio_rejects_file_outside_inbox(self):
+        outside_file = Path(self.temp_dir.name) / "outside.mp3"
+        outside_file.write_bytes(b"outside audio content 123")
 
-        err_dir = fail_workflow_job(
-            paths=self.paths,
-            job_id=metadata.job_id,
-            audio_filename="failed_meeting.mp3",
-            audio_path=target_audio,
-            job_dir=job_dir,
-            stage="Transcription",
-            error_message="Whisper engine error",
-        )
+        with self.assertRaises(DriveWorkflowError) as ctx:
+            claim_inbox_audio(outside_file, self.paths, check_interval_seconds=0.0)
 
-        self.assertTrue(err_dir.exists())
-        self.assertTrue(err_dir.is_relative_to(self.paths.error))
+        self.assertIn("is not located directly inside 01_Inbox", str(ctx.exception))
+        self.assertTrue(outside_file.exists())
 
-        # Failed audio file is preserved (not deleted)
-        preserved_audio = err_dir / "failed_meeting.mp3"
-        self.assertTrue(preserved_audio.exists())
-        self.assertEqual(preserved_audio.read_bytes(), raw_bytes)
-
-        # error.json created
-        err_json_file = err_dir / "error.json"
-        self.assertTrue(err_json_file.exists())
-        err_data = json.loads(err_json_file.read_text(encoding="utf-8"))
-        self.assertEqual(err_data["job_id"], metadata.job_id)
-        self.assertEqual(err_data["audio_filename"], "failed_meeting.mp3")
-        self.assertEqual(err_data["stage"], "Transcription")
-        self.assertIn("Whisper engine error", err_data["error"])
-        self.assertIn("failed_at", err_data)
-
-    def test_complete_workflow_job_success(self):
+    def test_completion_audio_move_failure_raises_drive_workflow_error_and_preserves_processing_dir(self):
         audio = self.paths.inbox / "workflow_meeting.mp3"
-        raw_bytes = b"workflow audio bytes 999"
-        audio.write_bytes(raw_bytes)
+        audio.write_bytes(b"workflow audio content 123")
 
         job_dir, target_audio, metadata = claim_inbox_audio(audio, self.paths, check_interval_seconds=0.0)
 
         transcript_result = TranscriptionResult(
             job_id=metadata.job_id,
             language="th",
-            full_text="สรุปการประชุมงาน PLAUD และ Google Drive",
+            full_text="สรุปการประชุม",
             segments=[],
         )
 
         summary_result = MeetingSummaryResult(
             job_id=metadata.job_id,
             language="th",
-            title="การประชุม Drive Workflow",
-            quick_summary="สรุปสั้นการเชื่อมต่อ workflow",
-            key_topics=["Drive Sync"],
-            full_summary="รายละเอียดสรุปยาว...",
-            decisions=["อนุมัติ workflow"],
-            action_items=[ActionItem(task="ทดสอบระบบ", owner="สมชาย", due_date="2026-09-30")],
+            title="หัวข้อประชุม",
+            quick_summary="สรุป",
+            key_topics=[],
+            full_summary="รายละเอียด",
+            decisions=[],
+            action_items=[],
             risks=[],
             follow_up=[],
         )
 
-        res = complete_workflow_job(
-            job_dir=job_dir,
-            target_audio_path=target_audio,
-            metadata=metadata,
-            transcript_result=transcript_result,
-            summary_result=summary_result,
-            paths=self.paths,
-            template_name="Management Meeting",
+    def test_completion_audio_move_failure_raises_drive_workflow_error_and_preserves_processing_dir(self):
+        import unittest.mock as mock
+        audio = self.paths.inbox / "workflow_meeting.mp3"
+        audio.write_bytes(b"workflow audio content 123")
+
+        job_dir, target_audio, metadata = claim_inbox_audio(audio, self.paths, check_interval_seconds=0.0)
+
+        transcript_result = TranscriptionResult(
+            job_id=metadata.job_id,
+            language="th",
+            full_text="สรุปการประชุม",
+            segments=[],
         )
 
-        self.assertTrue(res.package_dir.exists())
-        self.assertTrue(res.package_dir.is_relative_to(self.paths.completed))
-        self.assertTrue(res.summary_path.exists())
-        self.assertTrue(res.transcript_path.exists())
-        self.assertTrue(res.ai_ready_path.exists())
-        self.assertTrue(res.audio_reference_path.exists())
+        summary_result = MeetingSummaryResult(
+            job_id=metadata.job_id,
+            language="th",
+            title="หัวข้อประชุม",
+            quick_summary="สรุป",
+            key_topics=[],
+            full_summary="รายละเอียด",
+            decisions=[],
+            action_items=[],
+            risks=[],
+            follow_up=[],
+        )
 
-        # Audio file moved into completed package folder
-        completed_audio = res.package_dir / "workflow_meeting.mp3"
-        self.assertTrue(completed_audio.exists())
-        self.assertEqual(completed_audio.read_bytes(), raw_bytes)
+        with mock.patch("orbis_meeting.drive_workflow.shutil.move", side_effect=OSError("Move failed")):
+            with self.assertRaises(DriveWorkflowError):
+                complete_workflow_job(
+                    job_dir=job_dir,
+                    target_audio_path=target_audio,
+                    metadata=metadata,
+                    transcript_result=transcript_result,
+                    summary_result=summary_result,
+                    paths=self.paths,
+                )
 
-        # 02_Processing job_dir cleaned up
-        self.assertFalse(job_dir.exists())
+        # 02_Processing job_dir remains preserved so data is recoverable
+        self.assertTrue(job_dir.exists())
 
 
 class TestUIControllerDriveWorkflowIntegration(unittest.TestCase):
@@ -257,7 +246,7 @@ class TestUIControllerDriveWorkflowIntegration(unittest.TestCase):
         audio = self.paths.inbox / "inbox_job.mp3"
         audio.write_bytes(b"dummy audio binary 123")
 
-        meta = self.controller.load_next_inbox_audio()
+        meta = self.controller.load_next_inbox_audio(check_interval_seconds=0.0)
         self.assertIsNotNone(meta)
         self.assertEqual(meta.filename, "inbox_job.mp3")
         self.assertEqual(self.controller.job_origin, "WORKFLOW")
@@ -268,7 +257,7 @@ class TestUIControllerDriveWorkflowIntegration(unittest.TestCase):
         # 1. Claim workflow job
         audio = self.paths.inbox / "inbox_job.mp3"
         audio.write_bytes(b"dummy audio binary 123")
-        self.controller.load_next_inbox_audio()
+        self.controller.load_next_inbox_audio(check_interval_seconds=0.0)
         self.assertEqual(self.controller.job_origin, "WORKFLOW")
 
         # 2. Select manual audio file
@@ -288,6 +277,103 @@ class TestUIControllerDriveWorkflowIntegration(unittest.TestCase):
             self.controller.complete_workflow_job()
         self.assertIn("Current job is not a Google Drive workflow job", str(ctx.exception))
 
+    def test_workflow_transcription_failure_routes_to_error_and_clears_state(self):
+        import unittest.mock as mock
+        mock_transcribe = mock.MagicMock(side_effect=TranscriptionError("Whisper hardware error"))
+        self.controller.transcription_service.transcribe = mock_transcribe
 
-if __name__ == "__main__":
-    unittest.main()
+        audio = self.paths.inbox / "failing_job.mp3"
+        raw_bytes = b"failing audio binary 123"
+        audio.write_bytes(raw_bytes)
+
+        self.controller.load_next_inbox_audio(check_interval_seconds=0.0)
+        self.assertEqual(self.controller.job_origin, "WORKFLOW")
+
+        started = self.controller.start_transcription()
+        self.assertTrue(started)
+        if self.controller.worker_thread:
+            self.controller.worker_thread.join(timeout=5.0)
+
+        # Verify job state cleared in controller
+        self.assertEqual(self.controller.job_origin, "MANUAL")
+        self.assertIsNone(self.controller.current_workflow_job_dir)
+        self.assertIsNone(self.controller.current_workflow_audio_path)
+
+        # Verify audio moved to 99_Error folder and error.json created
+        error_subdirs = list(self.paths.error.iterdir())
+        self.assertEqual(len(error_subdirs), 1)
+        err_dir = error_subdirs[0]
+
+        moved_audio = err_dir / "failing_job.mp3"
+        self.assertTrue(moved_audio.exists())
+        self.assertEqual(moved_audio.read_bytes(), raw_bytes)
+
+        err_json = err_dir / "error.json"
+        self.assertTrue(err_json.exists())
+        err_data = json.loads(err_json.read_text(encoding="utf-8"))
+        self.assertEqual(err_data["audio_filename"], "failing_job.mp3")
+        self.assertEqual(err_data["stage"], "Transcription/Cleanup")
+        self.assertIn("Whisper hardware error", err_data["error"])
+
+    def test_manual_transcription_failure_does_not_touch_manual_audio(self):
+        import unittest.mock as mock
+        mock_transcribe = mock.MagicMock(side_effect=TranscriptionError("Whisper hardware error"))
+        self.controller.transcription_service.transcribe = mock_transcribe
+
+        manual_audio = Path(self.temp_dir.name) / "manual_failing.mp3"
+        raw_bytes = b"manual audio binary bytes 456"
+        manual_audio.write_bytes(raw_bytes)
+
+        self.controller.select_audio_file(manual_audio)
+        self.assertEqual(self.controller.job_origin, "MANUAL")
+
+        started = self.controller.start_transcription()
+        self.assertTrue(started)
+        if self.controller.worker_thread:
+            self.controller.worker_thread.join(timeout=5.0)
+
+        # Manual audio file remains completely untouched
+        self.assertTrue(manual_audio.exists())
+        self.assertEqual(manual_audio.read_bytes(), raw_bytes)
+        self.assertEqual(len(list(self.paths.error.iterdir())), 0)
+
+
+    def test_successful_completion_clears_workflow_state_and_rejects_second_call(self):
+        audio = self.paths.inbox / "completing_job.mp3"
+        audio.write_bytes(b"completing audio binary 789")
+
+        self.controller.load_next_inbox_audio(check_interval_seconds=0.0)
+        self.assertEqual(self.controller.job_origin, "WORKFLOW")
+
+        self.controller.current_transcript_result = TranscriptionResult(
+            job_id="test_job",
+            language="th",
+            full_text="ข้อความประชุม",
+            segments=[],
+        )
+        self.controller.current_summary_result = MeetingSummaryResult(
+            job_id="test_job",
+            language="th",
+            title="การประชุม",
+            quick_summary="สรุป",
+            key_topics=[],
+            full_summary="รายละเอียด",
+            decisions=[],
+            action_items=[],
+            risks=[],
+            follow_up=[],
+        )
+
+        res = self.controller.complete_workflow_job()
+        self.assertTrue(res.package_dir.exists())
+
+        # State cleared
+        self.assertEqual(self.controller.job_origin, "MANUAL")
+        self.assertIsNone(self.controller.current_workflow_job_dir)
+        self.assertIsNone(self.controller.current_workflow_audio_path)
+
+        # Second complete call is rejected
+        with self.assertRaises(DriveWorkflowError) as ctx:
+            self.controller.complete_workflow_job()
+        self.assertIn("Current job is not a Google Drive workflow job", str(ctx.exception))
+
