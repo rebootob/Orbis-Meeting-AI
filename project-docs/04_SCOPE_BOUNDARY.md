@@ -5,27 +5,34 @@
 
 ---
 
-## 2. IN V1 SCOPE (LOCKED)
-- **Audio Source:** PLAUD audio files.
-- **Ingestion:** Google Drive Inbox polling / monitoring.
+## 2. IN V1 SCOPE (LOCKED — OWNER APPROVED EXTENSION)
+- **Audio Source:** PLAUD audio files (`.mp3`, `.wav`, `.m4a`).
+- **User Interface:** Local Desktop UI Shell (Tkinter/ttk).
+- **Ingestion:** Local file selection & Google Drive Inbox folder polling.
 - **Processing:** Local background worker processing.
-- **Transcription:** Local Whisper transcription.
+- **Transcription:** Local Whisper transcription engine.
 - **Post-Processing:** Thai text cleanup & company dictionary term replacement.
-- **Summarization:** Meeting summary generation (Quick Summary & Full Summary).
-- **Output:** Writing processed summaries, transcript, and original audio reference into Google Drive Completed folder.
-- **V1 Required Outputs:**
-  1. Quick Summary
-  2. Full Summary
-  3. Transcript
-  4. Original Audio reference/file
+- **Summarization:** Provider-neutral meeting summary generation.
+- **Output:** Writing processed summaries, transcript, and original audio reference into Google Drive Completed folder and displaying locally in Desktop UI.
+- **V1 Required Output Contract:**
+  1. AI-generated Meeting Title
+  2. Quick Summary
+  3. Key Topics
+  4. Full Summary
+  5. Decisions
+  6. Action Items (with optional task, owner, due_date)
+  7. Risks / Issues
+  8. Follow-up
+  9. Cleaned Transcript
+  10. Original Audio reference/file
 
 ---
 
 ## 3. STRICTLY OUT OF V1 SCOPE
+- **Web dashboard / browser-hosted application** (No admin panels, web interfaces, or frontend frameworks)
+- **Mobile Application** (No iOS/Android apps)
 - **Telegram integration** (No notifications, bots, webhooks, or stubs)
 - **LINE integration** (No notifications, bots, Flex Messages, or stubs)
-- **Dashboard / Web UI** (No admin panels, web interfaces, or frontend frameworks)
-- **Mobile Application** (No iOS/Android apps)
 - **Voice / Speaker Recognition** (No speaker diarization or voice profiling)
 - **Cross-Meeting Search** (No vector database or RAG indexing across meetings)
 - **Chatbot / Q&A interface** (No interactive chat query system)
@@ -43,4 +50,4 @@
 - Cross-meeting search & knowledge base
 - Web dashboard & meeting history management
 - Interactive AI Q&A chatbot
-- direct video conference integrations (Teams / Zoom)
+- Direct video conference integrations (Teams / Zoom)
