@@ -1,34 +1,46 @@
 # 02_ACTIVE_TASK.md — Active Work Package
 
 ## Work Package Details
-- **Active Work Package:** WP-000 Repository Foundation + Governance
-- **Objective:** Establish repository governance, authority structure, cost controls, and strict V1 scope boundaries before starting any application code implementation.
+- **Active Work Package:** WP-001 Local Audio Intake Foundation
+- **Objective:** Create a minimal, reliable local audio intake validation layer for Orbis Meeting AI. Validate audio files before downstream transcription processing without modifying original files.
 
 ---
 
 ## Scope Rules
 
 ### Allowed Changes
-- `README.md` (if necessary)
+- `src/**`
+- `tests/**`
 - `project-docs/**`
 
 ### Forbidden Changes
-- `src/**`
-- Application code or implementation scripts
-- Third-party dependencies or environment configuration
-- Google Drive API or client implementation
-- Whisper transcription engine or wrappers
-- Telegram notification adapters or stubs
-- LINE notification adapters or stubs
+- Whisper or transcription dependencies / wrappers
+- Audio decoding / FFmpeg integrations
+- Thai cleanup or company dictionary logic
+- Meeting summarization or LLM integration
+- Google Drive API or polling
+- Telegram or LINE notification code or stubs
+- Database or state persistence infrastructure
+- Web/Mobile UI or API servers
 
 ---
 
 ## Acceptance Criteria
-1. All nine governance documents exist under `project-docs/`.
-2. V1 scope is explicit across governance files.
-3. Out-of-scope items for V1 are explicitly listed.
-4. Authority hierarchy (Owner / ChatGPT / Antigravity / Claude Code) is explicitly defined.
-5. One-active-work-package rule is explicitly mandated.
-6. STOP conditions are explicitly specified.
-7. Telegram and LINE notifications remain future roadmap items only.
-8. Zero application code or stubs introduced during WP-000.
+- **AC-01:** Minimal Python project structure exists (`src/orbis_meeting/`, `tests/`).
+- **AC-02:** `.mp3` input is accepted.
+- **AC-03:** `.wav` input is accepted.
+- **AC-04:** `.m4a` input is accepted.
+- **AC-05:** Extension matching is case-insensitive (e.g. `.MP3`, `.WAV`, `.M4A`).
+- **AC-06:** Missing file path is rejected explicitly.
+- **AC-07:** Directory path is rejected explicitly.
+- **AC-08:** Unsupported extension is rejected explicitly.
+- **AC-09:** Zero-byte audio file is rejected explicitly.
+- **AC-10:** Accepted file returns metadata containing `job_id`, `original_path`, `filename`, `extension`, `file_size_bytes`.
+- **AC-11:** `job_id` is deterministic for the same unchanged input file.
+- **AC-12:** Original input audio file remains strictly unchanged (read-only).
+- **AC-13:** Focused automated tests cover all valid and invalid cases.
+- **AC-14:** All WP-001 unit tests pass.
+- **AC-15:** No transcription dependency or implementation exists.
+- **AC-16:** No Google Drive implementation exists.
+- **AC-17:** No Telegram or LINE notification code/stub exists.
+- **AC-18:** No application scope beyond WP-001 introduced.
