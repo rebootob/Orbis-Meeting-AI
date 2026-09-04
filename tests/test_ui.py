@@ -1,7 +1,8 @@
 """
-Unit tests for WP-005A Local Desktop UI Shell
+Unit tests for WP-005A Local Desktop UI Shell and Main-Thread Queue Handoff
 """
 
+import queue
 import sys
 import tempfile
 import unittest
@@ -68,10 +69,12 @@ class TestUIController(unittest.TestCase):
 
         self.fake_transcription = FakeTranscriptionService()
         self.fake_cleanup = FakeCleanupService()
+        self.event_queue: queue.Queue = queue.Queue()
 
         self.controller = OrbisMeetingController(
             transcription_service=self.fake_transcription,
             cleanup_service=self.fake_cleanup,
+            event_queue=self.event_queue,
             status_callback=lambda msg: self.status_messages.append(msg),
             metadata_callback=lambda meta: setattr(self, "displayed_metadata", meta),
             transcript_callback=lambda text: setattr(self, "displayed_transcript", text),
@@ -100,11 +103,9 @@ class TestUIController(unittest.TestCase):
         self.assertTrue(any("AUDIO_SELECTED" in msg for msg in self.status_messages))
 
     def test_cancelled_file_selection_behavior(self):
-        # Select valid file first
         self.controller.select_audio_file(self.sample_mp3)
         initial_meta = self.controller.current_metadata
 
-        # User cancels dialog -> select_audio_file(None) or ""
         meta1 = self.controller.select_audio_file(None)
         self.assertEqual(meta1, initial_meta)
 
@@ -129,7 +130,6 @@ class TestUIController(unittest.TestCase):
         started = self.controller.start_transcription()
         self.assertTrue(started)
 
-        # Wait for worker thread to complete
         if self.controller.worker_thread:
             self.controller.worker_thread.join(timeout=2.0)
 
@@ -142,11 +142,61 @@ class TestUIController(unittest.TestCase):
     def test_duplicate_transcribe_blocked_during_processing(self):
         self.controller.select_audio_file(self.sample_mp3)
 
-        # Set processing state to True to simulate active worker
         self.controller.is_processing = True
 
         started_again = self.controller.start_transcription()
         self.assertFalse(started_again)
+
+    def test_queue_handoff_success_flow(self):
+        # Drain initial events
+        events_before = []
+        while not self.event_queue.empty():
+            events_before.append(self.event_queue.get_nowait())
+
+        self.controller.select_audio_file(self.sample_mp3)
+        self.controller.start_transcription()
+
+        if self.controller.worker_thread:
+            self.controller.worker_thread.join(timeout=2.0)
+
+        queued_events = []
+        while not self.event_queue.empty():
+            queued_events.append(self.event_queue.get_nowait())
+
+        event_types = [evt[0] for evt in queued_events]
+        self.assertIn("METADATA", event_types)
+        self.assertIn("TRANSCRIPT", event_types)
+        self.assertIn("STATUS", event_types)
+        self.assertIn("COMPLETE", event_types)
+
+        # Confirm transcript payload in queue matches cleaned transcript
+        transcript_payload = [evt[1] for evt in queued_events if evt[0] == "TRANSCRIPT"][0]
+        self.assertEqual(transcript_payload, "สวัสดีครับ Kintone")
+
+    def test_queue_handoff_error_flow(self):
+        failing_transcription = FakeTranscriptionService(raise_exception=TranscriptionError("Engine outage"))
+        test_queue: queue.Queue = queue.Queue()
+        controller = OrbisMeetingController(
+            transcription_service=failing_transcription,
+            cleanup_service=self.fake_cleanup,
+            event_queue=test_queue,
+        )
+        controller.select_audio_file(self.sample_mp3)
+        controller.start_transcription()
+
+        if controller.worker_thread:
+            controller.worker_thread.join(timeout=2.0)
+
+        queued_events = []
+        while not test_queue.empty():
+            queued_events.append(test_queue.get_nowait())
+
+        event_types = [evt[0] for evt in queued_events]
+        self.assertIn("ERROR", event_types)
+        self.assertIn("COMPLETE", event_types)
+
+        error_payload = [evt[1] for evt in queued_events if evt[0] == "ERROR"][0]
+        self.assertIn("Engine outage", error_payload)
 
     def test_transcription_exception_handling(self):
         failing_transcription = FakeTranscriptionService(raise_exception=TranscriptionError("Engine error"))
