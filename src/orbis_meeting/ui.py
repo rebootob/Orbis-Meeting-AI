@@ -352,6 +352,10 @@ class OrbisMeetingController:
         if self.is_processing:
             return False
 
+        if self.auto_runner and self.auto_runner.is_running and self.job_origin == "WORKFLOW":
+            self._set_error("Cannot start manual transcription while automatic job runner is active on workflow job.")
+            return False
+
         if not self.current_metadata:
             self._set_error("No valid audio file selected. Please select a .mp3, .wav, or .m4a file.")
             return False
@@ -537,14 +541,17 @@ class OrbisMeetingWindow:
             state_val = payload.get("state", "STOPPED") if isinstance(payload, dict) else "STOPPED"
             job_val = payload.get("current_job") if isinstance(payload, dict) else None
             if hasattr(self, "runner_status_label"):
-                self.runner_status_label.config(text=f"Runner Status: {state_val}")
+                if state_val == "STOPPING":
+                    self.runner_status_label.config(text="Runner Status: STOPPING (Finishing in-flight job)")
+                else:
+                    self.runner_status_label.config(text=f"Runner Status: {state_val}")
                 self.runner_job_label.config(text=f"Current Job: {job_val or 'N/A'}")
 
             is_running = self.controller.auto_runner.is_running if self.controller.auto_runner else False
             if hasattr(self, "start_runner_button"):
                 if is_running:
                     self.start_runner_button.config(state=tk.DISABLED)
-                    self.stop_runner_button.config(state=tk.NORMAL)
+                    self.stop_runner_button.config(state=tk.DISABLED if state_val == "STOPPING" else tk.NORMAL)
                     self.browse_button.config(state=tk.DISABLED)
                 else:
                     self.start_runner_button.config(state=tk.NORMAL if self.controller.workflow_paths else tk.DISABLED)

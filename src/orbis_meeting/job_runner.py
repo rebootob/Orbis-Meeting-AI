@@ -36,6 +36,7 @@ class JobRunnerError(RuntimeError):
 class RunnerState(str, Enum):
     """Execution states for AutomaticJobRunner."""
     STOPPED = "STOPPED"
+    STOPPING = "STOPPING"
     IDLE = "IDLE"
     SCANNING = "SCANNING"
     CLAIMING = "CLAIMING"
@@ -73,11 +74,17 @@ class AutomaticJobRunner:
         self._is_running: bool = False
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
     @property
     def is_running(self) -> bool:
+        """True while the worker thread loop is actively running (not fully STOPPED)."""
         return self._is_running
+
+    @property
+    def is_stopping(self) -> bool:
+        """True if a stop request has been signaled but in-flight work is still draining."""
+        return self._stop_event.is_set() and self._is_running
 
     def _set_state(self, new_state: RunnerState, current_job: Optional[str] = None):
         """Update state and emit bounded event if state or current_job changed."""
@@ -98,7 +105,7 @@ class AutomaticJobRunner:
     def start(self) -> bool:
         """
         Start background job runner thread.
-        Idempotent: Returns False if runner is already active.
+        Idempotent: Returns False if runner is already active or stopping.
         """
         with self._lock:
             if self._is_running:
@@ -127,35 +134,53 @@ class AutomaticJobRunner:
         """
         Stop background job runner thread cleanly.
         Signals stop event without interrupting in-flight operations.
+        Drains in-flight work before transitioning to STOPPED.
         """
         with self._lock:
             if not self._is_running:
                 return False
-            self._is_running = False
             self._stop_event.set()
             thread = self._thread
+            if self.state not in (RunnerState.STOPPED, RunnerState.STOPPING):
+                self._set_state(RunnerState.STOPPING, self.current_job)
 
         if thread and thread.is_alive() and threading.current_thread() != thread:
             thread.join(timeout=timeout)
 
-        self._set_state(RunnerState.STOPPED, None)
-        if self.event_queue:
-            self.event_queue.put(("RUNNER_STOPPED", {"state": RunnerState.STOPPED.value}))
+        # Check if thread actually finished
+        with self._lock:
+            if thread and thread.is_alive():
+                # Thread is still draining in-flight work after timeout.
+                # Keep _is_running = True, manual mode remains blocked.
+                return False
+
+        # Thread finished cleanly. _runner_loop's finally block handles STOPPED state transition.
         return True
 
     def _runner_loop(self):
         """Background thread execution loop with non-busy polling wait."""
-        while not self._stop_event.is_set():
-            try:
-                self.run_once()
-            except Exception as e:
-                # Log unexpected loop error without crashing loop thread unless unrecoverable
-                self._set_state(RunnerState.ERROR, self.current_job)
-                if self.event_queue:
-                    self.event_queue.put(("RUNNER_ERROR", str(e)))
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    self.run_once()
+                except Exception as e:
+                    # Log unexpected loop error without crashing loop thread unless unrecoverable
+                    self._set_state(RunnerState.ERROR, self.current_job)
+                    if self.event_queue:
+                        self.event_queue.put(("RUNNER_ERROR", str(e)))
 
-            # Non-busy wait using Event.wait
-            self._stop_event.wait(self.scan_interval_seconds)
+                if self._stop_event.is_set():
+                    break
+
+                # Non-busy wait using Event.wait
+                self._stop_event.wait(self.scan_interval_seconds)
+        finally:
+            with self._lock:
+                self._is_running = False
+                self.state = RunnerState.STOPPED
+                self.current_job = None
+            if self.event_queue:
+                self.event_queue.put(("RUNNER_STOPPED", {"state": RunnerState.STOPPED.value}))
 
     def run_once(self) -> Optional[str]:
         """
@@ -164,6 +189,9 @@ class AutomaticJobRunner:
 
         Returns claimed filename/job_id if a job was processed, else None.
         """
+        if self._stop_event.is_set():
+            return None
+
         paths: Optional[DriveWorkflowPaths] = self.controller.workflow_paths
         if not paths:
             self._set_state(RunnerState.ERROR, None)
@@ -173,7 +201,8 @@ class AutomaticJobRunner:
         # If there is already an active workflow job in processing or waiting for summary, pause scanning.
         if self.controller.job_origin == "WORKFLOW" and self.controller.current_workflow_job_dir is not None:
             if self.controller.current_transcript_result is not None:
-                self._set_state(RunnerState.WAITING_FOR_SUMMARY, self.controller.current_metadata.filename if self.controller.current_metadata else None)
+                new_state = RunnerState.STOPPING if self._stop_event.is_set() else RunnerState.WAITING_FOR_SUMMARY
+                self._set_state(new_state, self.controller.current_metadata.filename if self.controller.current_metadata else None)
             return None
 
         # If controller is busy with manual processing, do not claim workflow audio
@@ -181,26 +210,33 @@ class AutomaticJobRunner:
             return None
 
         # Step 1: Scan 01_Inbox
-        self._set_state(RunnerState.SCANNING, None)
+        scan_state = RunnerState.STOPPING if self._stop_event.is_set() else RunnerState.SCANNING
+        self._set_state(scan_state, None)
         inbox_files = discover_inbox_audio(paths)
 
         if not inbox_files:
-            self._set_state(RunnerState.IDLE, None)
+            idle_state = RunnerState.STOPPING if self._stop_event.is_set() else RunnerState.IDLE
+            self._set_state(idle_state, None)
             return None
 
-        # Step 2: Select oldest deterministic file
-        candidate_audio = inbox_files[0]
+        # Step 2 & 3: Iterate deterministic oldest-first list and find the FIRST STABLE audio file
+        candidate_audio = None
+        for file_path in inbox_files:
+            if is_file_stable(
+                file_path,
+                check_interval_seconds=self.stability_interval_seconds,
+                sleep_fn=self.sleep_fn,
+            ):
+                candidate_audio = file_path
+                break
 
-        # Step 3: Real File Stability Check
-        is_stable = is_file_stable(
-            candidate_audio,
-            check_interval_seconds=self.stability_interval_seconds,
-            sleep_fn=self.sleep_fn,
-        )
+        if candidate_audio is None:
+            # None of the inbox files are stable yet; leave all in 01_Inbox
+            idle_state = RunnerState.STOPPING if self._stop_event.is_set() else RunnerState.IDLE
+            self._set_state(idle_state, None)
+            return None
 
-        if not is_stable:
-            # Unstable file remains in 01_Inbox without claiming or sending to Error
-            self._set_state(RunnerState.IDLE, None)
+        if self._stop_event.is_set():
             return None
 
         # Step 4: Claim audio file into 02_Processing
@@ -253,7 +289,8 @@ class AutomaticJobRunner:
                 self.event_queue.put(("STATUS", f"WORKFLOW AUTO: Cleaned transcript ready. WAITING_FOR_SUMMARY."))
                 self.event_queue.put(("COMPLETE", None))
 
-            self._set_state(RunnerState.WAITING_FOR_SUMMARY, metadata.filename)
+            final_state = RunnerState.STOPPING if self._stop_event.is_set() else RunnerState.WAITING_FOR_SUMMARY
+            self._set_state(final_state, metadata.filename)
             return metadata.filename
 
         except Exception as e:
@@ -280,5 +317,7 @@ class AutomaticJobRunner:
                 self.event_queue.put(("ERROR", f"Auto Runner Job Failure: {e}"))
                 self.event_queue.put(("STATUS", f"WORKFLOW AUTO ERROR: Job failed and moved to 99_Error. {e}"))
 
-            self._set_state(RunnerState.IDLE, None)
+            err_state = RunnerState.STOPPING if self._stop_event.is_set() else RunnerState.IDLE
+            self._set_state(err_state, None)
             return None
+

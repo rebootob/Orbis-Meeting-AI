@@ -5,8 +5,8 @@ Unit tests for WP-008 Automatic Job Runner Module (src/orbis_meeting/job_runner.
 import json
 import sys
 import tempfile
-import time
 import unittest
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -301,6 +301,132 @@ class TestAutomaticJobRunnerModule(unittest.TestCase):
         self.assertEqual(meta.filename, "manual_test.mp3")
         self.assertEqual(self.controller.job_origin, "MANUAL")
 
+    def test_stop_requested_during_inflight_transcription_drains_safely_and_blocks_manual_browse(self):
+        transcribe_started = threading.Event()
+        transcribe_allow_finish = threading.Event()
+
+        class BlockingTranscriptionService:
+            def transcribe(self, metadata):
+                transcribe_started.set()
+                transcribe_allow_finish.wait(timeout=5.0)
+                return TranscriptionResult(
+                    job_id=metadata.job_id,
+                    language="th",
+                    full_text="ข้อความจากการถอดเสียง",
+                    segments=[],
+                )
+
+        self.controller.transcription_service = BlockingTranscriptionService()
+
+        audio = self.paths.inbox / "blocking_job.mp3"
+        audio.write_bytes(b"blocking audio contents 123")
+
+        self.runner.start()
+        self.assertTrue(transcribe_started.wait(timeout=3.0))
+
+        try:
+            # Request stop while transcription is actively in-flight
+            stopped_immediately = self.runner.stop(timeout=0.05)
+            self.assertFalse(stopped_immediately)  # Thread is still running; stop pending/draining
+            self.assertTrue(self.runner.is_running)
+            self.assertIn(self.runner.state, (RunnerState.STOPPING, RunnerState.TRANSCRIBING))
+
+            # Manual Browse remains rejected while runner is draining
+            manual_audio = Path(self.temp_dir.name) / "manual_during_drain.mp3"
+            manual_audio.write_bytes(b"manual bytes")
+            self.controller.select_audio_file(manual_audio)
+            self.assertEqual(self.controller.state, "ERROR")
+        finally:
+            # Always unblock transcription thread so test tearDown does not deadlock
+            transcribe_allow_finish.set()
+
+        if self.runner._thread:
+            self.runner._thread.join(timeout=2.0)
+
+        # Runner is now fully STOPPED after thread exit
+        self.assertFalse(self.runner.is_running)
+        self.assertEqual(self.runner.state, RunnerState.STOPPED)
+
+        # Reset controller state and verify manual Browse works after runner is STOPPED
+        self.controller.state = "READY"
+        meta = self.controller.select_audio_file(manual_audio)
+        self.assertIsNotNone(meta)
+        self.assertEqual(meta.filename, "manual_during_drain.mp3")
+
+    def test_no_next_job_claimed_after_stop_request(self):
+        f1 = self.paths.inbox / "01_audio.mp3"
+        f1.write_bytes(b"audio 1")
+        f2 = self.paths.inbox / "02_audio.mp3"
+        f2.write_bytes(b"audio 2")
+
+        self.runner._stop_event.set()
+        claimed = self.runner.run_once()
+        self.assertIsNone(claimed)
+        self.assertTrue(f1.exists())
+        self.assertTrue(f2.exists())
+        self.assertEqual(f1.parent, self.paths.inbox)
+        self.assertEqual(f2.parent, self.paths.inbox)
+
+    def test_oldest_file_unstable_second_file_stable_selects_second_file(self):
+        f1_unstable = self.paths.inbox / "01_old_unstable.mp3"
+        f1_unstable.write_bytes(b"unstable audio bytes")
+
+        f2_stable = self.paths.inbox / "02_ready.mp3"
+        f2_stable.write_bytes(b"stable audio 2 bytes")
+
+        f3_stable = self.paths.inbox / "03_ready.mp3"
+        f3_stable.write_bytes(b"stable audio 3 bytes")
+
+        def selective_sleep(s):
+            # Mutate size of f1 to simulate active sync
+            f1_unstable.write_bytes(b"unstable audio bytes growing")
+
+        selective_runner = AutomaticJobRunner(
+            controller=self.controller,
+            scan_interval_seconds=0.05,
+            stability_interval_seconds=0.1,
+            sleep_fn=selective_sleep,
+        )
+
+        claimed = selective_runner.run_once()
+        self.assertEqual(claimed, "02_ready.mp3")
+
+        # 01_old_unstable.mp3 remains in 01_Inbox
+        self.assertTrue(f1_unstable.exists())
+        self.assertEqual(f1_unstable.parent, self.paths.inbox)
+
+        # 03_ready.mp3 remains in 01_Inbox (only one job claimed)
+        self.assertTrue(f3_stable.exists())
+        self.assertEqual(f3_stable.parent, self.paths.inbox)
+
+        # 99_Error remains empty
+        self.assertEqual(len(list(self.paths.error.iterdir())), 0)
+
+    def test_all_inbox_files_unstable_claims_none_and_returns_idle(self):
+        f1 = self.paths.inbox / "01_unstable.mp3"
+        f1.write_bytes(b"bytes 1")
+        f2 = self.paths.inbox / "02_unstable.mp3"
+        f2.write_bytes(b"bytes 2")
+
+        def all_unstable_sleep(s):
+            f1.write_bytes(b"bytes 1 growing")
+            f2.write_bytes(b"bytes 2 growing")
+
+        unstable_runner = AutomaticJobRunner(
+            controller=self.controller,
+            scan_interval_seconds=0.05,
+            stability_interval_seconds=0.1,
+            sleep_fn=all_unstable_sleep,
+        )
+
+        claimed = unstable_runner.run_once()
+        self.assertIsNone(claimed)
+        self.assertEqual(unstable_runner.state, RunnerState.IDLE)
+        self.assertTrue(f1.exists())
+        self.assertTrue(f2.exists())
+        self.assertEqual(len(list(self.paths.error.iterdir())), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
+
