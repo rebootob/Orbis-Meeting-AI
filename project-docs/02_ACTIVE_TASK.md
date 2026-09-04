@@ -1,8 +1,8 @@
 # 02_ACTIVE_TASK.md — Active Work Package
 
 ## Work Package Details
-- **Active Work Package:** WP-001 Local Audio Intake Foundation
-- **Objective:** Create a minimal, reliable local audio intake validation layer for Orbis Meeting AI. Validate audio files before downstream transcription processing without modifying original files.
+- **Active Work Package:** WP-002 Local Whisper Transcription Foundation
+- **Objective:** Implement a reliable local transcription layer using `faster-whisper` for validated WP-001 audio files. Return structured raw transcripts with timestamped segments without modifying original audio files.
 
 ---
 
@@ -12,35 +12,43 @@
 - `src/**`
 - `tests/**`
 - `project-docs/**`
+- `requirements.txt` (if needed for dependencies)
 
 ### Forbidden Changes
-- Whisper or transcription dependencies / wrappers
-- Audio decoding / FFmpeg integrations
-- Thai cleanup or company dictionary logic
-- Meeting summarization or LLM integration
-- Google Drive API or polling
-- Telegram or LINE notification code or stubs
-- Database or state persistence infrastructure
+- Thai text cleanup or company dictionary logic
+- Punctuation repair or post-processing beyond Whisper output
+- Summarization or LLM / OpenAI / Gemini / Claude API integration
+- Google Drive API, authentication, or polling
+- Telegram or LINE notification adapters or stubs
+- Speaker diarization, voice profiling, or speaker recognition
+- Database or vector search / RAG framework
 - Web/Mobile UI or API servers
 
 ---
 
 ## Acceptance Criteria
-- **AC-01:** Minimal Python project structure exists (`src/orbis_meeting/`, `tests/`).
-- **AC-02:** `.mp3` input is accepted.
-- **AC-03:** `.wav` input is accepted.
-- **AC-04:** `.m4a` input is accepted.
-- **AC-05:** Extension matching is case-insensitive (e.g. `.MP3`, `.WAV`, `.M4A`).
-- **AC-06:** Missing file path is rejected explicitly.
-- **AC-07:** Directory path is rejected explicitly.
-- **AC-08:** Unsupported extension is rejected explicitly.
-- **AC-09:** Zero-byte audio file is rejected explicitly.
-- **AC-10:** Accepted file returns metadata containing `job_id`, `original_path`, `filename`, `extension`, `file_size_bytes`.
-- **AC-11:** `job_id` is deterministic for the same unchanged input file.
-- **AC-12:** Original input audio file remains strictly unchanged (read-only).
-- **AC-13:** Focused automated tests cover all valid and invalid cases.
-- **AC-14:** All WP-001 unit tests pass.
-- **AC-15:** No transcription dependency or implementation exists.
-- **AC-16:** No Google Drive implementation exists.
-- **AC-17:** No Telegram or LINE notification code/stub exists.
-- **AC-18:** No application scope beyond WP-001 introduced.
+- **AC-01:** WP-001 audio intake remains working unchanged.
+- **AC-02:** Transcription module exists (`src/orbis_meeting/transcription.py`).
+- **AC-03:** Transcription uses `faster-whisper` through a minimal wrapper/service.
+- **AC-04:** Model name is configurable (default: `large-v3`).
+- **AC-05:** Device is configurable (e.g. `cpu`, `cuda`, `auto`).
+- **AC-06:** Compute type is configurable (e.g. `int8`, `float16`, `default`).
+- **AC-07:** Service accepts validated WP-001 audio input (`AudioJobMetadata`).
+- **AC-08:** Result contains `job_id`, `language`, `full_text`, `segments`.
+- **AC-09:** Every segment contains `start`, `end`, `text`.
+- **AC-10:** Thai transcription mode is supported (`language="th"`).
+- **AC-11:** English transcription mode is supported (`language="en"`).
+- **AC-12:** Automatic language detection is supported when `language=None`.
+- **AC-13:** Original audio is not modified.
+- **AC-14:** Model loading errors fail explicitly (`TranscriptionError`).
+- **AC-15:** Transcription execution errors fail explicitly (`TranscriptionError`).
+- **AC-16:** Invalid/empty transcription result fails explicitly (`TranscriptionError`).
+- **AC-17:** Unit tests do NOT download a real Whisper model.
+- **AC-18:** Focused tests use fake/mock transcription backend behavior.
+- **AC-19:** All WP-001 tests continue to pass.
+- **AC-20:** All WP-002 focused tests pass.
+- **AC-21:** No Google Drive code exists.
+- **AC-22:** No Thai cleanup/dictionary logic exists.
+- **AC-23:** No summarization exists.
+- **AC-24:** No Telegram/LINE implementation or stubs exist.
+- **AC-25:** No scope beyond WP-002 introduced.
