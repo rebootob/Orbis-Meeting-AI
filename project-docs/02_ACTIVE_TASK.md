@@ -1,8 +1,8 @@
 # 02_ACTIVE_TASK.md — Active Work Package
 
 ## Work Package Details
-- **Active Work Package:** WP-010 Automatic End-to-End Completion
-- **Objective:** Extend `AutomaticJobRunner` (`src/orbis_meeting/job_runner.py`) so that when a workflow job reaches `SUMMARY_READY` via local automatic summary, the runner automatically transitions state to `COMPLETING`, invokes `controller.complete_workflow_job()`, verifies exported package outputs in `03_Completed` (Summary.md, Transcript.txt, AI_SUMMARY_READY.md, audio_reference.json, and original audio), clears active workflow session state, transitions state to `IDLE`, and allows subsequent runner scans to process the next Inbox audio file automatically. If completion fails, job state is preserved in `02_Processing` without routing to `99_Error`, state transitions to `COMPLETION_ERROR`, and manual retry is allowed.
+- **Active Work Package:** WP-011 Control Center / Job History
+- **Objective:** Provide a filesystem-based read-only Control Center & Job History module (`src/orbis_meeting/control_center.py`) and a bilingual (Thai / English) Tkinter UI integration (`src/orbis_meeting/ui.py`). Features include counting audio files in `01_Inbox`, processing jobs in `02_Processing`, completed packages in `03_Completed`, and error directories in `99_Error`; displaying up to 10 most recent completed meetings and error packages (parsing `error.json` with safe fallback handling); offering safe native OS folder opening (`os.startfile`); supporting runtime language toggle (TH | EN) without app restart while leaving internal runner states ("TRANSCRIBING", "COMPLETING", etc.) unchanged; and enabling "Retry Completion" ONLY when runner state is `COMPLETION_ERROR`.
 
 ---
 
@@ -14,26 +14,23 @@
 - `project-docs/**`
 
 ### Forbidden Changes
+- Database (SQLite, PostgreSQL, ORM) or web dashboard
 - Cloud AI APIs (OpenAI, Gemini, Claude, HTTP requests)
 - Google Drive API, OAuth, service accounts
-- Telegram, LINE, Email, PDF/DOCX export, databases, web/mobile UIs
+- Telegram, LINE, Email, PDF/DOCX export, mobile UIs
 - Speaker diarization, cross-meeting search, multi-host concurrency
 - External schedulers, cron, or asyncio rewrites
 
 ---
 
 ## Acceptance Criteria
-- **AC-01:** WP-001 through WP-009 remain working.
-- **AC-02:** Automatic completion occurs after automatic `SUMMARY_READY`.
-- **AC-03:** `COMPLETING` and `COMPLETION_ERROR` runner states exist.
-- **AC-04:** Completion reuses existing workflow completion primitive (`complete_workflow_job`).
-- **AC-05:** Package created under `03_Completed`.
-- **AC-06:** Required package files exist (`Summary.md`, `Transcript.txt`, `AI_SUMMARY_READY.md`, `audio_reference.json`).
-- **AC-07:** Workflow-owned original audio is preserved/finalized safely without byte modification.
-- **AC-08:** Successful completion clears active workflow session state.
-- **AC-09:** Runner returns to `IDLE` after completion.
-- **AC-10:** Runner can process next Inbox meeting on subsequent scan (single active job policy maintained).
-- **AC-11:** Completion failure transitions to `COMPLETION_ERROR`, preserving session data and blocking next job.
-- **AC-12:** Manual retry/recovery possible.
-- **AC-13:** Stop/drain safety preserved.
-- **AC-14:** Focused and full tests pass.
+- **AC-01:** WP-001 through WP-010 remain working.
+- **AC-02:** Pure read-only filesystem scanning without database or file mutations in Control Center.
+- **AC-03:** Accurate folder counts for `01_Inbox`, `02_Processing`, `03_Completed`, and `99_Error`.
+- **AC-04:** Displays top 10 recent completed packages (sorted by mtime descending) with title extraction from `Summary.md`.
+- **AC-05:** Displays top 10 recent error packages (sorted by mtime descending) with safe fallback if `error.json` is corrupt or missing.
+- **AC-06:** Native OS folder opening (`open_folder_in_os`) handles non-existent paths gracefully.
+- **AC-07:** Bilingual UI support (TH / EN) with runtime language toggle.
+- **AC-08:** Internal state strings remain unchanged; translated strictly for display.
+- **AC-09:** Retry Completion button enabled ONLY when runner state is `COMPLETION_ERROR`.
+- **AC-10:** Comprehensive unit test suite (164 tests) passes cleanly.
