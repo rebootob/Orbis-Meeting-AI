@@ -18,6 +18,7 @@ from orbis_meeting.text_cleanup import (
     load_company_dictionary,
     normalize_whitespace,
     apply_dictionary_replacement,
+    validate_dictionary_idempotency,
 )
 
 
@@ -66,7 +67,7 @@ class TestTextCleanup(unittest.TestCase):
         self.assertEqual(result, "การประชุม QA HOLD วันนี้")
         self.assertNotIn("QAโฮล", result)
 
-    def test_idempotency(self):
+    def test_idempotency_across_passes(self):
         dictionary = {"คินโทน": "Kintone", "คิวเอโฮล": "QA HOLD"}
         service = TextCleanupService(dictionary=dictionary)
 
@@ -75,6 +76,27 @@ class TestTextCleanup(unittest.TestCase):
 
         self.assertEqual(first_pass.full_text, second_pass.full_text)
         self.assertEqual(first_pass.segments, second_pass.segments)
+
+    def test_non_recursive_same_pass_replacement(self):
+        # In a single pass, generated replacement text ("BETA") must not be recursively replaced by a key "BETA"
+        # Using apply_dictionary_replacement directly on raw text:
+        dictionary = {"ALPHA": "BETA", "OTHER": "GAMMA"}
+        input_text = "ALPHA OTHER"
+
+        result = apply_dictionary_replacement(input_text, dictionary)
+        self.assertEqual(result, "BETA GAMMA")
+
+    def test_unsafe_chained_dictionary_rejected(self):
+        # Mappings where a replacement value contains a source key must raise TextCleanupError
+        unsafe_dict1 = {"A": "B", "B": "C"}
+        with self.assertRaises(TextCleanupError) as ctx1:
+            validate_dictionary_idempotency(unsafe_dict1)
+        self.assertIn("Unsafe dictionary mapping detected", str(ctx1.exception))
+
+        unsafe_dict2 = {"คิวเอ": "QA", "QA": "Quality Assurance"}
+        with self.assertRaises(TextCleanupError) as ctx2:
+            TextCleanupService(dictionary=unsafe_dict2)
+        self.assertIn("Unsafe dictionary mapping detected", str(ctx2.exception))
 
     def test_timestamps_and_order_preserved(self):
         service = TextCleanupService(dictionary={"คินโทน": "Kintone"})
@@ -130,7 +152,7 @@ class TestTextCleanup(unittest.TestCase):
             service.clean_transcript("not a TranscriptionResult")
 
     def test_default_config_dictionary_file_exists(self):
-        # Verify committed config/company_dictionary.json is loadable and valid JSON
+        # Verify committed config/company_dictionary.json is loadable, valid JSON, and passes idempotency validation
         dict_data = load_company_dictionary("config/company_dictionary.json")
         self.assertIsInstance(dict_data, dict)
         self.assertIn("คินโทน", dict_data)

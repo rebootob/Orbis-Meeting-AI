@@ -18,6 +18,22 @@ class TextCleanupError(ValueError):
     pass
 
 
+def validate_dictionary_idempotency(dictionary: Dict[str, str]) -> None:
+    """
+    Validate that dictionary replacement values do not contain any dictionary source keys.
+    This prevents chained replacements that would violate idempotency across cleanup passes.
+    """
+    for key in dictionary.keys():
+        if not key:
+            continue
+        for val in dictionary.values():
+            if key in val:
+                raise TextCleanupError(
+                    f"Unsafe dictionary mapping detected: replacement value '{val}' contains source key '{key}'. "
+                    "This violates cleanup idempotency across passes."
+                )
+
+
 def load_company_dictionary(dictionary_path: Optional[Union[str, Path]] = None) -> Dict[str, str]:
     """
     Load company dictionary mappings from a JSON file.
@@ -53,6 +69,7 @@ def load_company_dictionary(dictionary_path: Optional[Union[str, Path]] = None) 
         if k:
             cleaned_dict[k] = v
 
+    validate_dictionary_idempotency(cleaned_dict)
     return cleaned_dict
 
 
@@ -65,21 +82,17 @@ def normalize_whitespace(text: str) -> str:
 
 def apply_dictionary_replacement(text: str, dictionary: Dict[str, str]) -> str:
     """
-    Apply dictionary replacements deterministically.
+    Apply dictionary replacements deterministically in a single pass against original text spans.
     Longer matching keys take precedence over shorter keys.
+    Generated text is not recursively replaced within the same pass.
     """
     if not text or not dictionary:
         return text
 
     sorted_keys = sorted(dictionary.keys(), key=len, reverse=True)
+    pattern = re.compile("|".join(re.escape(k) for k in sorted_keys))
 
-    result = text
-    for key in sorted_keys:
-        val = dictionary[key]
-        if key in result:
-            result = result.replace(key, val)
-
-    return result
+    return pattern.sub(lambda m: dictionary[m.group(0)], text)
 
 
 class TextCleanupService:
@@ -90,6 +103,7 @@ class TextCleanupService:
 
     def __init__(self, dictionary: Optional[Dict[str, str]] = None, dictionary_path: Optional[Union[str, Path]] = None):
         if dictionary is not None:
+            validate_dictionary_idempotency(dictionary)
             self.dictionary = dictionary
         else:
             self.dictionary = load_company_dictionary(dictionary_path)
