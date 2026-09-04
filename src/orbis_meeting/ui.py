@@ -27,6 +27,11 @@ from orbis_meeting.manual_handoff import (
     build_manual_ai_payload,
     import_manual_ai_result,
 )
+from orbis_meeting.export_package import (
+    ExportPackageError,
+    ExportPackageResult,
+    export_meeting_package,
+)
 
 
 def format_summary_text(summary: Optional[MeetingSummaryResult]) -> str:
@@ -269,6 +274,32 @@ class OrbisMeetingController:
         self._emit_event("SUMMARY_IMPORTED", summary_result)
         return summary_result
 
+    def export_meeting_package(
+        self,
+        output_parent: Union[str, Path],
+        template_name: str = "General Meeting",
+    ) -> ExportPackageResult:
+        """
+        Export the current meeting package (Summary.md, Transcript.txt, AI_SUMMARY_READY.md, audio_reference.json)
+        to the specified output parent directory.
+
+        Raises ExportPackageError if required session data is missing or export fails.
+        """
+        if not self.current_metadata or not self.current_transcript_result or not self.current_summary_result:
+            raise ExportPackageError(
+                "Cannot export meeting package: metadata, transcript, and summary must all be completed first."
+            )
+
+        result = export_meeting_package(
+            output_parent=output_parent,
+            metadata=self.current_metadata,
+            transcript_result=self.current_transcript_result,
+            summary_result=self.current_summary_result,
+            template_name=template_name,
+        )
+        self._emit_event("PACKAGE_EXPORTED", result)
+        return result
+
     def _set_error(self, message: str):
         self.state = "ERROR"
         self._emit_event("ERROR", message)
@@ -331,6 +362,7 @@ class OrbisMeetingWindow:
                 self.lbl_size.config(text="File Size: N/A")
                 self.transcribe_button.config(state=tk.DISABLED)
                 self.copy_ai_button.config(state=tk.DISABLED)
+            self.export_button.config(state=tk.DISABLED)
         elif event_type == "TRANSCRIPT":
             self.transcript_text.config(state=tk.NORMAL)
             self.transcript_text.delete("1.0", tk.END)
@@ -343,6 +375,9 @@ class OrbisMeetingWindow:
             if payload is not None:
                 formatted = format_summary_text(payload)
                 self.summary_text.insert(tk.END, formatted)
+                self.export_button.config(state=tk.NORMAL)
+            else:
+                self.export_button.config(state=tk.DISABLED)
             self.summary_text.config(state=tk.DISABLED)
         elif event_type == "ERROR":
             messagebox.showerror("Orbis Meeting AI Error", payload)
@@ -499,7 +534,7 @@ class OrbisMeetingWindow:
         )
         self.import_status_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        # WP-005C Summary Viewer Section (PLAUD-like Layout)
+        # WP-005C Summary Viewer Section (PLAUD-like Layout) & WP-006 Export Action
         summary_viewer_frame = ttk.LabelFrame(main_frame, text="Meeting Summary Viewer (PLAUD-like)", padding="10")
         summary_viewer_frame.pack(fill=tk.BOTH, expand=True)
 
@@ -513,9 +548,20 @@ class OrbisMeetingWindow:
             font=("Consolas", 10),
             height=8,
         )
-        self.summary_text.pack(fill=tk.BOTH, expand=True)
+        self.summary_text.pack(fill=tk.BOTH, expand=True, pady=(0, 5))
         summary_scroll.config(command=self.summary_text.yview)
         self.summary_text.config(state=tk.DISABLED)
+
+        export_row = ttk.Frame(summary_viewer_frame)
+        export_row.pack(fill=tk.X, pady=(5, 0))
+
+        self.export_button = ttk.Button(
+            export_row,
+            text="Save Meeting Package...",
+            command=self._on_export_package_clicked,
+            state=tk.DISABLED,
+        )
+        self.export_button.pack(side=tk.LEFT)
 
     def _on_browse_clicked(self):
         file_path = filedialog.askopenfilename(
@@ -536,6 +582,7 @@ class OrbisMeetingWindow:
             self.transcribe_button.config(state=tk.DISABLED)
             self.browse_button.config(state=tk.DISABLED)
             self.copy_ai_button.config(state=tk.DISABLED)
+            self.export_button.config(state=tk.DISABLED)
             self.controller.start_transcription()
 
     def _on_copy_ai_clicked(self):
@@ -572,6 +619,21 @@ class OrbisMeetingWindow:
                 font=("Helvetica", 9, "italic"),
             )
             messagebox.showerror("Import Validation Error", str(e))
+
+    def _on_export_package_clicked(self):
+        output_dir = filedialog.askdirectory(title="Select Destination Directory for Meeting Package")
+        if not output_dir:
+            return
+
+        try:
+            template = self.template_var.get()
+            result = self.controller.export_meeting_package(output_dir, template_name=template)
+            messagebox.showinfo(
+                "Export Successful",
+                f"Successfully saved meeting package:\n\nFolder: {result.package_dir.name}\nPath: {result.package_dir}",
+            )
+        except Exception as e:
+            messagebox.showerror("Export Error", str(e))
 
 
 def launch_app():
