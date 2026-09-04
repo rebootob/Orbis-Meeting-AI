@@ -120,6 +120,9 @@ def format_summary_text(summary: Optional[MeetingSummaryResult]) -> str:
     return "\n".join(lines)
 
 
+
+
+
 class OrbisMeetingController:
     """
     Testable application controller managing desktop UI state transitions,
@@ -325,28 +328,8 @@ class OrbisMeetingController:
                 )
             raise DriveWorkflowError(f"Failed to claim Inbox audio: {e}") from e
 
-    def complete_workflow_job(self, template_name: str = "General Meeting") -> ExportPackageResult:
-        """
-        Complete current WORKFLOW job, exporting package to 03_Completed.
-        Raises DriveWorkflowError if job_origin is MANUAL or data missing.
-        """
-        if self.job_origin != "WORKFLOW" or not self.workflow_paths:
-            raise DriveWorkflowError("Current job is not a Google Drive workflow job.")
-
-        if not self.current_metadata or not self.current_transcript_result or not self.current_summary_result:
-            raise DriveWorkflowError("Cannot complete workflow job: metadata, transcript, and summary required.")
-
-        result = complete_workflow_job(
-            job_dir=self.current_workflow_job_dir,
-            target_audio_path=self.current_workflow_audio_path,
-            metadata=self.current_metadata,
-            transcript_result=self.current_transcript_result,
-            summary_result=self.current_summary_result,
-            paths=self.workflow_paths,
-            template_name=template_name,
-        )
-
-        # Clear workflow job tracking so duplicate Complete calls are rejected
+    def clear_completed_workflow_state(self):
+        """Clear active workflow job tracking state after validated completion."""
         self.current_workflow_job_dir = None
         self.current_workflow_audio_path = None
         self.job_origin = "MANUAL"
@@ -368,8 +351,45 @@ class OrbisMeetingController:
                     "is_running": self.auto_runner.is_running,
                 }))
 
-        self._emit_event("WORKFLOW_COMPLETED", result)
-        self._emit_event("STATUS", "WORKFLOW: Saved to local Google Drive sync folder (03_Completed).")
+    def complete_workflow_job(
+        self,
+        template_name: str = "General Meeting",
+        clear_state: bool = True,
+    ) -> ExportPackageResult:
+        """
+        Complete current WORKFLOW job, exporting package to 03_Completed.
+        If clear_state is True, validates completion invariants and clears workflow state.
+        If clear_state is False, returns export result without clearing workflow state yet.
+        Raises DriveWorkflowError if job_origin is MANUAL, data missing, or validation fails.
+        """
+        if self.job_origin != "WORKFLOW" or not self.workflow_paths:
+            raise DriveWorkflowError("Current job is not a Google Drive workflow job.")
+
+        if not self.current_metadata or not self.current_transcript_result or not self.current_summary_result:
+            raise DriveWorkflowError("Cannot complete workflow job: metadata, transcript, and summary required.")
+
+        audio_filename = self.current_metadata.filename if self.current_metadata else None
+
+        result = complete_workflow_job(
+            job_dir=self.current_workflow_job_dir,
+            target_audio_path=self.current_workflow_audio_path,
+            metadata=self.current_metadata,
+            transcript_result=self.current_transcript_result,
+            summary_result=self.current_summary_result,
+            paths=self.workflow_paths,
+            template_name=template_name,
+        )
+
+        from orbis_meeting.job_runner import validate_completion_result
+
+        if not validate_completion_result(result, self.workflow_paths, audio_filename):
+            raise DriveWorkflowError("Exported meeting package failed post-completion invariant validation.")
+
+        if clear_state:
+            self.clear_completed_workflow_state()
+            self._emit_event("WORKFLOW_COMPLETED", result)
+            self._emit_event("STATUS", "WORKFLOW: Saved to local Google Drive sync folder (03_Completed).")
+
         return result
 
     def start_transcription(self) -> bool:

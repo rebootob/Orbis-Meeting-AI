@@ -26,6 +26,38 @@ from orbis_meeting.drive_workflow import (
 )
 from orbis_meeting.transcription import TranscriptionResult, TranscriptionError
 from orbis_meeting.text_cleanup import TextCleanupError
+from orbis_meeting.export_package import ExportPackageResult
+
+
+def validate_completion_result(
+    result: Optional[Any],
+    paths: Optional[DriveWorkflowPaths] = None,
+    audio_filename: Optional[str] = None,
+) -> bool:
+    """
+    Validate that exported meeting package contains all required files and invariants.
+    """
+    if result is None:
+        return False
+
+    pkg_dir = getattr(result, "package_dir", None)
+    if not pkg_dir or not isinstance(pkg_dir, Path) or not pkg_dir.exists() or not pkg_dir.is_dir():
+        return False
+
+    if paths and paths.completed and paths.completed.exists():
+        if pkg_dir.parent.resolve() != paths.completed.resolve():
+            return False
+
+    required_files = ["Summary.md", "Transcript.txt", "AI_SUMMARY_READY.md", "audio_reference.json"]
+    for filename in required_files:
+        if not (pkg_dir / filename).exists():
+            return False
+
+    if audio_filename and audio_filename.strip():
+        if not (pkg_dir / audio_filename).exists():
+            return False
+
+    return True
 
 
 class JobRunnerError(RuntimeError):
@@ -76,6 +108,7 @@ class AutomaticJobRunner:
 
         self.state: RunnerState = RunnerState.STOPPED
         self.current_job: Optional[str] = None
+        self.last_completion_result: Optional[Any] = None
         self._is_running: bool = False
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -338,28 +371,27 @@ class AutomaticJobRunner:
                     if self._stop_event.is_set():
                         return metadata.filename
 
-                    # Step 9: Automatic End-to-End Completion (WP-010)
+                    # Step 9: Automatic End-to-End Completion (WP-010 & WP-010-R1)
                     self._set_state(RunnerState.COMPLETING, metadata.filename)
                     if self.event_queue:
                         self.event_queue.put(("STATUS", f"WORKFLOW AUTO: Exporting completed meeting package for {metadata.filename}..."))
 
                     try:
                         template_name = getattr(self.controller, "summary_template", "General Meeting")
-                        complete_res = self.controller.complete_workflow_job(template_name=template_name)
+                        complete_res = self.controller.complete_workflow_job(
+                            template_name=template_name,
+                            clear_state=False,
+                        )
+                        self.last_completion_result = complete_res
 
-                        # Validate completion invariants
-                        if not complete_res or not complete_res.package_dir.exists():
-                            raise JobRunnerError("Exported package directory does not exist after completion.")
-                        if not (complete_res.package_dir / "Summary.md").exists():
-                            raise JobRunnerError("Summary.md missing in exported package.")
-                        if not (complete_res.package_dir / "Transcript.txt").exists():
-                            raise JobRunnerError("Transcript.txt missing in exported package.")
-                        if not (complete_res.package_dir / "AI_SUMMARY_READY.md").exists():
-                            raise JobRunnerError("AI_SUMMARY_READY.md missing in exported package.")
-                        if not (complete_res.package_dir / "audio_reference.json").exists():
-                            raise JobRunnerError("audio_reference.json missing in exported package.")
+                        if not validate_completion_result(complete_res, paths, metadata.filename):
+                            raise JobRunnerError("Exported meeting package failed post-completion invariant validation.")
+
+                        self.controller.clear_completed_workflow_state()
+                        self.last_completion_result = None
 
                         if self.event_queue:
+                            self.event_queue.put(("WORKFLOW_COMPLETED", complete_res))
                             self.event_queue.put(("STATUS", "WORKFLOW AUTO: Meeting completed to local Google Drive sync folder."))
 
                         final_state = RunnerState.STOPPING if self._stop_event.is_set() else RunnerState.IDLE
@@ -367,8 +399,10 @@ class AutomaticJobRunner:
                         return metadata.filename
 
                     except Exception as e:
-                        # Completion failure: preserve current summary, transcript, audio, processing job dir
-                        # Transition state to COMPLETION_ERROR without sending to 99_Error
+                        # Completion or validation failure:
+                        # Controller workflow tracking state is NOT cleared.
+                        # Preserve current summary, transcript, audio, processing job dir.
+                        # Transition runner state to COMPLETION_ERROR without sending to 99_Error.
                         if self.event_queue:
                             self.event_queue.put(("ERROR", f"Auto Completion Error: {e}"))
                             self.event_queue.put(("STATUS", f"WORKFLOW AUTO COMPLETION ERROR: {e}. Session data preserved for retry."))
@@ -427,6 +461,8 @@ class AutomaticJobRunner:
     def retry_current_completion(self) -> Any:
         """
         Retry automatic completion for the current job if state is COMPLETION_ERROR or SUMMARY_READY.
+        Revalidates existing last_completion_result if finalization already succeeded, preventing
+        duplicate package creation in 03_Completed.
         """
         with self._lock:
             if self.state not in (RunnerState.COMPLETION_ERROR, RunnerState.SUMMARY_READY):
@@ -437,12 +473,38 @@ class AutomaticJobRunner:
             )
 
         self._set_state(RunnerState.COMPLETING, filename)
+        paths = self.controller.workflow_paths
+        audio_name = self.controller.current_metadata.filename if self.controller.current_metadata else None
+
+        # 1. Revalidate existing last_completion_result if finalization already succeeded
+        if self.last_completion_result is not None and validate_completion_result(self.last_completion_result, paths, audio_name):
+            res = self.last_completion_result
+            self.controller.clear_completed_workflow_state()
+            self.last_completion_result = None
+
+            if self.event_queue:
+                self.event_queue.put(("WORKFLOW_COMPLETED", res))
+                self.event_queue.put(("STATUS", "WORKFLOW AUTO: Meeting completed to local Google Drive sync folder."))
+
+            final_state = RunnerState.STOPPING if self._stop_event.is_set() else RunnerState.IDLE
+            self._set_state(final_state, None)
+            return res
+
+        # 2. Otherwise perform completion
         try:
             template_name = getattr(self.controller, "summary_template", "General Meeting")
-            res = self.controller.complete_workflow_job(template_name=template_name)
+            res = self.controller.complete_workflow_job(template_name=template_name, clear_state=False)
+            self.last_completion_result = res
 
-            if not res or not res.package_dir.exists():
-                raise JobRunnerError("Exported package directory does not exist after completion.")
+            if not validate_completion_result(res, paths, audio_name):
+                raise JobRunnerError("Exported meeting package failed post-completion invariant validation during retry.")
+
+            self.controller.clear_completed_workflow_state()
+            self.last_completion_result = None
+
+            if self.event_queue:
+                self.event_queue.put(("WORKFLOW_COMPLETED", res))
+                self.event_queue.put(("STATUS", "WORKFLOW AUTO: Meeting completed to local Google Drive sync folder."))
 
             final_state = RunnerState.STOPPING if self._stop_event.is_set() else RunnerState.IDLE
             self._set_state(final_state, None)

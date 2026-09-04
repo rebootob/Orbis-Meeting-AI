@@ -615,6 +615,51 @@ class TestAutomaticJobRunnerModule(unittest.TestCase):
         self.assertTrue(res.package_dir.exists())
         self.assertEqual(self.runner.state, RunnerState.IDLE)
 
+    def test_invariant_failure_does_not_clear_workflow_state_and_preserves_recovery(self):
+        from test_auto_summary import FakeProvider, create_valid_summary_json_dict
+        from orbis_meeting.auto_summary import AutomaticSummaryService
+
+        valid_json = json.dumps(create_valid_summary_json_dict())
+        self.controller.auto_summary_service = AutomaticSummaryService(
+            provider=FakeProvider(response_text=valid_json),
+        )
+
+        audio = self.paths.inbox / "invariant_fail.mp3"
+        audio.write_bytes(b"invariant fail audio")
+
+        orig_complete = self.controller.complete_workflow_job
+
+        def incomplete_complete(*args, **kwargs):
+            res = orig_complete(*args, **kwargs)
+            # Simulate a missing Summary.md file after finalization
+            if (res.package_dir / "Summary.md").exists():
+                (res.package_dir / "Summary.md").unlink()
+            return res
+
+        self.controller.complete_workflow_job = incomplete_complete
+
+        claimed = self.runner.run_once()
+        self.assertEqual(claimed, "invariant_fail.mp3")
+
+        # Runner transitions to COMPLETION_ERROR because Summary.md is missing
+        self.assertEqual(self.runner.state, RunnerState.COMPLETION_ERROR)
+
+        # Controller workflow state was NOT cleared
+        self.assertEqual(self.controller.job_origin, "WORKFLOW")
+
+        # Re-creating the missing Summary.md file allows retry_current_completion() to re-validate without duplicate package
+        completed_pkgs = list(self.paths.completed.iterdir())
+        self.assertEqual(len(completed_pkgs), 1)
+        pkg_dir = completed_pkgs[0]
+        (pkg_dir / "Summary.md").write_text("# Recovered Summary", encoding="utf-8")
+
+        # Retry re-validates last_completion_result without creating a second package
+        res = self.runner.retry_current_completion()
+        self.assertTrue(res.package_dir.exists())
+        self.assertEqual(self.runner.state, RunnerState.IDLE)
+        self.assertEqual(len(list(self.paths.completed.iterdir())), 1)
+        self.assertEqual(self.controller.job_origin, "MANUAL")
+
 
 if __name__ == "__main__":
     unittest.main()
