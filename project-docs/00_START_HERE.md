@@ -17,16 +17,16 @@
 ---
 
 ## 3. Mandatory Startup Reading Order
-Before performing any analysis or work in this repository, agents and contributors must read documents in this exact order:
+Before performing any analysis or work in this repository, agents and contributors must read ONLY:
 
 1. `project-docs/00_START_HERE.md` (Governance & rules)
 2. `project-docs/01_CURRENT_STATE.md` (Current system state & agent status)
 3. `project-docs/02_ACTIVE_TASK.md` (Current active work package details)
 4. `project-docs/04_SCOPE_BOUNDARY.md` (Strict in-scope vs out-of-scope boundaries)
-5. `project-docs/03_ARCHITECTURE.md` (System design & flow)
-6. `project-docs/05_DECISIONS.md` (Architecture Decision Records)
-7. `project-docs/06_TEST_PLAN.md` (Verification strategy)
-8. `project-docs/07_ROADMAP.md` (Phased implementation plan)
+
+Read `project-docs/03_ARCHITECTURE.md`, `05_DECISIONS.md`, `06_TEST_PLAN.md`, `07_ROADMAP.md`, `CHAT_HANDOFF.md`, source files, tests, or evidence ONLY WHEN DIRECTLY RELEVANT to the current task.
+
+Do not require full-document reading on every session.
 
 ---
 
@@ -37,6 +37,7 @@ Before performing any analysis or work in this repository, agents and contributo
 ---
 
 ## 5. Cost-Control Rules
+- **Minimum Necessary Context:** Minimum necessary repository context must be preferred over broad repository reading to reduce token overhead.
 - **Concise Documentation:** Prefer operational, direct documentation over verbose explanations.
 - **Local-First & No Speculative Costs:** Use local Whisper transcription to avoid recurring per-minute API costs.
 - **Zero Speculative Abstractions:** Do not write unused interfaces, speculative provider patterns, or unused infrastructure code.
