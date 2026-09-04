@@ -1,5 +1,5 @@
 """
-Unit tests for WP-005A & WP-005B Local Desktop UI Shell and Controller Methods
+Unit tests for WP-005A, WP-005B & WP-005C Local Desktop UI Shell and Summary Viewer
 """
 
 import queue
@@ -16,8 +16,8 @@ from orbis_meeting.audio_intake import AudioJobMetadata
 from orbis_meeting.transcription import TranscriptionResult, TranscriptionSegment, TranscriptionError
 from orbis_meeting.text_cleanup import TextCleanupError
 from orbis_meeting.manual_handoff import ManualHandoffError
-from orbis_meeting.ui import OrbisMeetingController
-
+from orbis_meeting.summary import MeetingSummaryResult, ActionItem
+from orbis_meeting.ui import OrbisMeetingController, format_summary_text
 
 class FakeTranscriptionService:
     def __init__(self, raw_text="สวัสดีครับ คินโทน", raise_exception=None):
@@ -53,6 +53,91 @@ class FakeCleanupService:
         )
 
 
+class TestSummaryViewerFormatting(unittest.TestCase):
+
+    def setUp(self):
+        self.full_summary_result = MeetingSummaryResult(
+            job_id="job_001",
+            language="th",
+            title="การประชุม Kintone และ PLAUD Integration",
+            quick_summary="สรุปการประชุมเรื่องการเชื่อมต่อระบบ Kintone",
+            key_topics=["Kintone API", "PLAUD Audio Sync"],
+            full_summary="รายละเอียดการหารือเกี่ยวกับการเชื่อมต่อ API และการจัดการไฟล์เสียง PLAUD...",
+            decisions=["อนุมัติแผนงานการเชื่อมต่อ Kintone API"],
+            action_items=[
+                ActionItem(task="ทดสอบ API Endpoint", owner="สมชาย", due_date="2026-09-15"),
+                ActionItem(task="จัดทำเอกสาร", owner=None, due_date=None),
+            ],
+            risks=["ความล่าช้าจากโครงข่าย"],
+            follow_up=["นัดหมายประชุมสัปดาห์หน้า"],
+        )
+
+    def test_format_summary_text_full_content(self):
+        text = format_summary_text(self.full_summary_result)
+        self.assertIn("MEETING TITLE: การประชุม Kintone และ PLAUD Integration", text)
+        self.assertIn("QUICK SUMMARY", text)
+        self.assertIn("สรุปการประชุมเรื่องการเชื่อมต่อระบบ Kintone", text)
+        self.assertIn("KEY TOPICS", text)
+        self.assertIn("• Kintone API", text)
+        self.assertIn("• PLAUD Audio Sync", text)
+        self.assertIn("FULL SUMMARY", text)
+        self.assertIn("รายละเอียดการหารือ", text)
+        self.assertIn("DECISIONS", text)
+        self.assertIn("• อนุมัติแผนงานการเชื่อมต่อ Kintone API", text)
+        self.assertIn("ACTION ITEMS", text)
+        self.assertIn("1. Task: ทดสอบ API Endpoint", text)
+        self.assertIn("Owner: สมชาย | Due Date: 2026-09-15", text)
+        self.assertIn("2. Task: จัดทำเอกสาร", text)
+        self.assertIn("Owner: - | Due Date: -", text)
+        self.assertIn("RISKS / ISSUES", text)
+        self.assertIn("• ความล่าช้าจากโครงข่าย", text)
+        self.assertIn("FOLLOW-UP", text)
+        self.assertIn("• นัดหมายประชุมสัปดาห์หน้า", text)
+
+    def test_format_summary_text_none_input(self):
+        self.assertEqual(format_summary_text(None), "")
+
+    def test_format_summary_text_empty_lists(self):
+        empty_summary = MeetingSummaryResult(
+            job_id="job_002",
+            language="th",
+            title="Empty Summary Test",
+            quick_summary="Quick summary text",
+            key_topics=[],
+            full_summary="Full summary text",
+            decisions=[],
+            action_items=[],
+            risks=[],
+            follow_up=[],
+        )
+        text = format_summary_text(empty_summary)
+        self.assertIn("No key topics identified.", text)
+        self.assertIn("No explicit decisions recorded.", text)
+        self.assertIn("No action items recorded.", text)
+        self.assertIn("No risks/issues identified.", text)
+        self.assertIn("No follow-up items recorded.", text)
+
+    def test_format_summary_text_language_preservation(self):
+        mixed_summary = MeetingSummaryResult(
+            job_id="job_003",
+            language="th",
+            title="Meeting 123: Kintone & PLAUD",
+            quick_summary="Summary in Thai และ English",
+            key_topics=["Topic 1: Kintone"],
+            full_summary="Full summary details with English words.",
+            decisions=["Decision 1"],
+            action_items=[ActionItem(task="Deploy Kintone plugin", owner="John", due_date="2026-10-01")],
+            risks=["Risk A"],
+            follow_up=["Follow-up B"],
+        )
+        text = format_summary_text(mixed_summary)
+        self.assertIn("Meeting 123: Kintone & PLAUD", text)
+        self.assertIn("Summary in Thai และ English", text)
+        self.assertIn("Deploy Kintone plugin", text)
+        self.assertIn("John", text)
+        self.assertIn("2026-10-01", text)
+
+
 class TestUIController(unittest.TestCase):
 
     def setUp(self):
@@ -61,6 +146,9 @@ class TestUIController(unittest.TestCase):
 
         self.sample_mp3 = self.test_dir / "test_audio.mp3"
         self.sample_mp3.write_bytes(b"dummy mp3 content for UI testing 12345")
+
+        self.sample_mp3_2 = self.test_dir / "test_audio_2.mp3"
+        self.sample_mp3_2.write_bytes(b"dummy mp3 content 2 for UI testing 67890")
 
         self.status_messages: List[str] = []
         self.error_messages: List[str] = []
@@ -93,6 +181,19 @@ class TestUIController(unittest.TestCase):
           "action_items": [{"task": "Task 1", "owner": "Owner 1", "due_date": "2026-09-20"}],
           "risks": ["Risk 1"],
           "follow_up": ["Follow up 1"]
+        }
+        """
+
+        self.valid_ai_json_2 = """
+        {
+          "title": "การประชุมสัปดาห์ถัดไป",
+          "quick_summary": "สรุปสั้นครั้งที่ 2",
+          "key_topics": ["Topic 2"],
+          "full_summary": "สรุปละเอียดครั้งที่ 2",
+          "decisions": ["Decision 2"],
+          "action_items": [{"task": "Task 2", "owner": null, "due_date": null}],
+          "risks": [],
+          "follow_up": []
         }
         """
 
@@ -210,6 +311,45 @@ class TestUIController(unittest.TestCase):
         self.assertIsNotNone(summary_result)
         self.assertEqual(summary_result.title, "การประชุม Kintone")
         self.assertEqual(self.controller.current_summary_result, summary_result)
+
+    def test_import_ai_result_emits_summary_imported_event(self):
+        self.controller.import_ai_result(self.valid_ai_json)
+
+        queued_events = []
+        while not self.event_queue.empty():
+            queued_events.append(self.event_queue.get_nowait())
+
+        imported_events = [evt for evt in queued_events if evt[0] == "SUMMARY_IMPORTED"]
+        self.assertEqual(len(imported_events), 1)
+        self.assertEqual(imported_events[0][1].title, "การประชุม Kintone")
+
+    def test_selecting_new_audio_clears_stale_summary_result(self):
+        self.controller.import_ai_result(self.valid_ai_json)
+        self.assertIsNotNone(self.controller.current_summary_result)
+
+        # Drain previous events
+        while not self.event_queue.empty():
+            self.event_queue.get_nowait()
+
+        # Select new audio file
+        self.controller.select_audio_file(self.sample_mp3_2)
+        self.assertIsNone(self.controller.current_summary_result)
+
+        queued_events = []
+        while not self.event_queue.empty():
+            queued_events.append(self.event_queue.get_nowait())
+
+        imported_events = [evt for evt in queued_events if evt[0] == "SUMMARY_IMPORTED"]
+        self.assertEqual(len(imported_events), 1)
+        self.assertIsNone(imported_events[0][1])
+
+    def test_second_imported_summary_replaces_first(self):
+        summary1 = self.controller.import_ai_result(self.valid_ai_json)
+        self.assertEqual(self.controller.current_summary_result.title, "การประชุม Kintone")
+
+        summary2 = self.controller.import_ai_result(self.valid_ai_json_2)
+        self.assertEqual(self.controller.current_summary_result.title, "การประชุมสัปดาห์ถัดไป")
+        self.assertNotEqual(summary1, summary2)
 
     def test_original_audio_file_unmodified(self):
         initial_content = self.sample_mp3.read_bytes()

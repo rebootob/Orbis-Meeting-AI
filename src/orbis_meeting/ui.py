@@ -29,6 +29,81 @@ from orbis_meeting.manual_handoff import (
 )
 
 
+def format_summary_text(summary: Optional[MeetingSummaryResult]) -> str:
+    """
+    Format a MeetingSummaryResult object into a clear, human-readable text document
+    matching PLAUD-like information hierarchy.
+
+    Returns empty string if summary is None.
+    """
+    if summary is None:
+        return ""
+
+    lines = []
+    lines.append(f"MEETING TITLE: {summary.title}")
+    lines.append("=" * 60)
+    lines.append("")
+
+    lines.append("QUICK SUMMARY")
+    lines.append("-" * 30)
+    lines.append(summary.quick_summary)
+    lines.append("")
+
+    lines.append("KEY TOPICS")
+    lines.append("-" * 30)
+    if summary.key_topics:
+        for topic in summary.key_topics:
+            lines.append(f"• {topic}")
+    else:
+        lines.append("No key topics identified.")
+    lines.append("")
+
+    lines.append("FULL SUMMARY")
+    lines.append("-" * 30)
+    lines.append(summary.full_summary)
+    lines.append("")
+
+    lines.append("DECISIONS")
+    lines.append("-" * 30)
+    if summary.decisions:
+        for decision in summary.decisions:
+            lines.append(f"• {decision}")
+    else:
+        lines.append("No explicit decisions recorded.")
+    lines.append("")
+
+    lines.append("ACTION ITEMS")
+    lines.append("-" * 30)
+    if summary.action_items:
+        for idx, item in enumerate(summary.action_items, 1):
+            owner = item.owner if item.owner and item.owner.strip() else "-"
+            due_date = item.due_date if item.due_date and item.due_date.strip() else "-"
+            lines.append(f"{idx}. Task: {item.task}")
+            lines.append(f"   Owner: {owner} | Due Date: {due_date}")
+    else:
+        lines.append("No action items recorded.")
+    lines.append("")
+
+    lines.append("RISKS / ISSUES")
+    lines.append("-" * 30)
+    if summary.risks:
+        for risk in summary.risks:
+            lines.append(f"• {risk}")
+    else:
+        lines.append("No risks/issues identified.")
+    lines.append("")
+
+    lines.append("FOLLOW-UP")
+    lines.append("-" * 30)
+    if summary.follow_up:
+        for item in summary.follow_up:
+            lines.append(f"• {item}")
+    else:
+        lines.append("No follow-up items recorded.")
+
+    return "\n".join(lines)
+
+
 class OrbisMeetingController:
     """
     Testable application controller managing desktop UI state transitions,
@@ -101,6 +176,7 @@ class OrbisMeetingController:
             self.current_summary_result = None
             self.state = "AUDIO_SELECTED"
             self._emit_event("METADATA", metadata)
+            self._emit_event("SUMMARY_IMPORTED", None)
             self._emit_event("STATUS", f"AUDIO_SELECTED: {metadata.filename}")
             return metadata
         except AudioIntakeError as e:
@@ -108,6 +184,7 @@ class OrbisMeetingController:
             self.current_transcript_result = None
             self.current_summary_result = None
             self._emit_event("METADATA", None)
+            self._emit_event("SUMMARY_IMPORTED", None)
             self._set_error(f"Audio Intake Error: {e}")
             return None
         except Exception as e:
@@ -115,6 +192,7 @@ class OrbisMeetingController:
             self.current_transcript_result = None
             self.current_summary_result = None
             self._emit_event("METADATA", None)
+            self._emit_event("SUMMARY_IMPORTED", None)
             self._set_error(f"Validation Error: {e}")
             return None
 
@@ -201,14 +279,14 @@ class OrbisMeetingWindow:
     """
     Tkinter Graphical Desktop Window interface.
     Drains event_queue on the main Tkinter thread for all widget updates.
-    Includes WP-005A audio/transcription UI and WP-005B Manual AI Handoff UI.
+    Includes WP-005A audio/transcription UI, WP-005B Manual AI Handoff UI, and WP-005C Summary Viewer.
     """
 
     def __init__(self, root: tk.Tk, controller: Optional[OrbisMeetingController] = None):
         self.root = root
         self.root.title("Orbis Meeting AI — Local Desktop Shell")
-        self.root.geometry("750x750")
-        self.root.minsize(600, 550)
+        self.root.geometry("800x850")
+        self.root.minsize(600, 600)
 
         self.ui_queue: queue.Queue = queue.Queue()
 
@@ -259,6 +337,13 @@ class OrbisMeetingWindow:
             self.transcript_text.insert(tk.END, payload)
             self.transcript_text.config(state=tk.DISABLED)
             self.copy_ai_button.config(state=tk.NORMAL)
+        elif event_type == "SUMMARY_IMPORTED":
+            self.summary_text.config(state=tk.NORMAL)
+            self.summary_text.delete("1.0", tk.END)
+            if payload is not None:
+                formatted = format_summary_text(payload)
+                self.summary_text.insert(tk.END, formatted)
+            self.summary_text.config(state=tk.DISABLED)
         elif event_type == "ERROR":
             messagebox.showerror("Orbis Meeting AI Error", payload)
         elif event_type == "COMPLETE":
@@ -342,7 +427,7 @@ class OrbisMeetingWindow:
             wrap=tk.WORD,
             yscrollcommand=scrollbar.set,
             font=("Consolas", 10),
-            height=6,
+            height=5,
         )
         self.transcript_text.pack(fill=tk.BOTH, expand=True)
         scrollbar.config(command=self.transcript_text.yview)
@@ -350,11 +435,11 @@ class OrbisMeetingWindow:
 
         # WP-005B Manual AI Handoff Section
         handoff_frame = ttk.LabelFrame(main_frame, text="Manual AI Handoff (ChatGPT / Gemini / Claude)", padding="10")
-        handoff_frame.pack(fill=tk.BOTH, expand=True)
+        handoff_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
 
         # Template Selection & Copy Row
         template_row = ttk.Frame(handoff_frame)
-        template_row.pack(fill=tk.X, pady=(0, 10))
+        template_row.pack(fill=tk.X, pady=(0, 5))
 
         ttk.Label(template_row, text="Summary Template:").pack(side=tk.LEFT, padx=(0, 5))
 
@@ -392,7 +477,7 @@ class OrbisMeetingWindow:
             wrap=tk.WORD,
             yscrollcommand=import_scroll.set,
             font=("Consolas", 9),
-            height=5,
+            height=4,
         )
         self.ai_result_text.pack(fill=tk.BOTH, expand=True, pady=(0, 5))
         import_scroll.config(command=self.ai_result_text.yview)
@@ -413,6 +498,24 @@ class OrbisMeetingWindow:
             font=("Helvetica", 9, "italic"),
         )
         self.import_status_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        # WP-005C Summary Viewer Section (PLAUD-like Layout)
+        summary_viewer_frame = ttk.LabelFrame(main_frame, text="Meeting Summary Viewer (PLAUD-like)", padding="10")
+        summary_viewer_frame.pack(fill=tk.BOTH, expand=True)
+
+        summary_scroll = ttk.Scrollbar(summary_viewer_frame)
+        summary_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.summary_text = tk.Text(
+            summary_viewer_frame,
+            wrap=tk.WORD,
+            yscrollcommand=summary_scroll.set,
+            font=("Consolas", 10),
+            height=8,
+        )
+        self.summary_text.pack(fill=tk.BOTH, expand=True)
+        summary_scroll.config(command=self.summary_text.yview)
+        self.summary_text.config(state=tk.DISABLED)
 
     def _on_browse_clicked(self):
         file_path = filedialog.askopenfilename(
