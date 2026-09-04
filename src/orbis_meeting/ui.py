@@ -32,6 +32,15 @@ from orbis_meeting.export_package import (
     ExportPackageResult,
     export_meeting_package,
 )
+from orbis_meeting.drive_workflow import (
+    DriveWorkflowError,
+    DriveWorkflowPaths,
+    initialize_workflow_root,
+    discover_inbox_audio,
+    claim_inbox_audio,
+    complete_workflow_job,
+    fail_workflow_job,
+)
 
 
 def format_summary_text(summary: Optional[MeetingSummaryResult]) -> str:
@@ -141,6 +150,11 @@ class OrbisMeetingController:
         self.current_transcript_result: Optional[TranscriptionResult] = None
         self.current_summary_result: Optional[MeetingSummaryResult] = None
 
+        self.workflow_paths: Optional[DriveWorkflowPaths] = None
+        self.job_origin: str = "MANUAL"  # "MANUAL" or "WORKFLOW"
+        self.current_workflow_job_dir: Optional[Path] = None
+        self.current_workflow_audio_path: Optional[Path] = None
+
         self.state: str = "READY"
         self.is_processing: bool = False
         self.worker_thread: Optional[threading.Thread] = None
@@ -166,6 +180,7 @@ class OrbisMeetingController:
         """
         Handle user selecting an audio file.
         If file_path is None or empty (user cancelled dialog), do nothing and maintain current state.
+        Sets job_origin = "MANUAL".
         """
         if file_path is None or (isinstance(file_path, str) and not file_path.strip()):
             return self.current_metadata
@@ -176,6 +191,9 @@ class OrbisMeetingController:
 
         try:
             metadata = validate_and_intake_audio(file_path)
+            self.job_origin = "MANUAL"
+            self.current_workflow_job_dir = None
+            self.current_workflow_audio_path = None
             self.current_metadata = metadata
             self.current_transcript_result = None
             self.current_summary_result = None
@@ -185,6 +203,9 @@ class OrbisMeetingController:
             self._emit_event("STATUS", f"AUDIO_SELECTED: {metadata.filename}")
             return metadata
         except AudioIntakeError as e:
+            self.job_origin = "MANUAL"
+            self.current_workflow_job_dir = None
+            self.current_workflow_audio_path = None
             self.current_metadata = None
             self.current_transcript_result = None
             self.current_summary_result = None
@@ -193,6 +214,9 @@ class OrbisMeetingController:
             self._set_error(f"Audio Intake Error: {e}")
             return None
         except Exception as e:
+            self.job_origin = "MANUAL"
+            self.current_workflow_job_dir = None
+            self.current_workflow_audio_path = None
             self.current_metadata = None
             self.current_transcript_result = None
             self.current_summary_result = None
@@ -200,6 +224,88 @@ class OrbisMeetingController:
             self._emit_event("SUMMARY_IMPORTED", None)
             self._set_error(f"Validation Error: {e}")
             return None
+
+    def set_workflow_root(self, root_path: Union[str, Path]) -> DriveWorkflowPaths:
+        """
+        Configure and initialize local Google Drive workflow root directory.
+        Raises DriveWorkflowError if root is invalid.
+        """
+        paths = initialize_workflow_root(root_path)
+        self.workflow_paths = paths
+        self._emit_event("WORKFLOW_INITIALIZED", paths)
+        self._emit_event("STATUS", f"WORKFLOW: Initialized at {paths.root.name}")
+        return paths
+
+    def load_next_inbox_audio(self) -> Optional[AudioJobMetadata]:
+        """
+        Discover, claim, and intake the next stable audio file from 01_Inbox.
+        Sets job_origin = "WORKFLOW".
+        Raises DriveWorkflowError if no workflow root or no stable inbox audio.
+        """
+        if not self.workflow_paths:
+            raise DriveWorkflowError("Workflow root is not initialized. Please select a workflow root first.")
+
+        if self.is_processing:
+            raise DriveWorkflowError("Cannot load next Inbox audio while processing is active.")
+
+        inbox_files = discover_inbox_audio(self.workflow_paths)
+        if not inbox_files:
+            raise DriveWorkflowError("No supported audio files found in 01_Inbox.")
+
+        next_audio = inbox_files[0]
+        try:
+            job_dir, target_audio, metadata = claim_inbox_audio(
+                next_audio,
+                self.workflow_paths,
+                check_interval_seconds=0.0,
+            )
+            self.job_origin = "WORKFLOW"
+            self.current_workflow_job_dir = job_dir
+            self.current_workflow_audio_path = target_audio
+            self.current_metadata = metadata
+            self.current_transcript_result = None
+            self.current_summary_result = None
+            self.state = "AUDIO_SELECTED"
+
+            self._emit_event("METADATA", metadata)
+            self._emit_event("SUMMARY_IMPORTED", None)
+            self._emit_event("STATUS", f"WORKFLOW: Claimed {metadata.filename} into 02_Processing.")
+            return metadata
+        except Exception as e:
+            fail_workflow_job(
+                paths=self.workflow_paths,
+                job_id="unknown",
+                audio_filename=next_audio.name,
+                audio_path=next_audio,
+                stage="Claim/Intake",
+                error_message=str(e),
+            )
+            raise DriveWorkflowError(f"Failed to claim Inbox audio: {e}") from e
+
+    def complete_workflow_job(self, template_name: str = "General Meeting") -> ExportPackageResult:
+        """
+        Complete current WORKFLOW job, exporting package to 03_Completed.
+        Raises DriveWorkflowError if job_origin is MANUAL or data missing.
+        """
+        if self.job_origin != "WORKFLOW" or not self.workflow_paths:
+            raise DriveWorkflowError("Current job is not a Google Drive workflow job.")
+
+        if not self.current_metadata or not self.current_transcript_result or not self.current_summary_result:
+            raise DriveWorkflowError("Cannot complete workflow job: metadata, transcript, and summary required.")
+
+        result = complete_workflow_job(
+            job_dir=self.current_workflow_job_dir,
+            target_audio_path=self.current_workflow_audio_path,
+            metadata=self.current_metadata,
+            transcript_result=self.current_transcript_result,
+            summary_result=self.current_summary_result,
+            paths=self.workflow_paths,
+            template_name=template_name,
+        )
+
+        self._emit_event("WORKFLOW_COMPLETED", result)
+        self._emit_event("STATUS", "WORKFLOW: Saved to local Google Drive sync folder (03_Completed).")
+        return result
 
     def start_transcription(self) -> bool:
         """
@@ -348,6 +454,9 @@ class OrbisMeetingWindow:
         """
         if event_type == "STATUS":
             self.status_label.config(text=f"Status: {payload}")
+        elif event_type == "WORKFLOW_INITIALIZED":
+            self.workflow_root_label.config(text=f"Workflow Root: {payload.root}", font=("Helvetica", 9, "bold"))
+            self.load_inbox_button.config(state=tk.NORMAL)
         elif event_type == "METADATA":
             if payload:
                 self.selected_file_label.config(text=payload.filename, font=("Helvetica", 10, "bold"))
@@ -363,6 +472,7 @@ class OrbisMeetingWindow:
                 self.transcribe_button.config(state=tk.DISABLED)
                 self.copy_ai_button.config(state=tk.DISABLED)
             self.export_button.config(state=tk.DISABLED)
+            self.complete_workflow_button.config(state=tk.DISABLED)
         elif event_type == "TRANSCRIPT":
             self.transcript_text.config(state=tk.NORMAL)
             self.transcript_text.delete("1.0", tk.END)
@@ -376,8 +486,11 @@ class OrbisMeetingWindow:
                 formatted = format_summary_text(payload)
                 self.summary_text.insert(tk.END, formatted)
                 self.export_button.config(state=tk.NORMAL)
+                if self.controller.job_origin == "WORKFLOW":
+                    self.complete_workflow_button.config(state=tk.NORMAL)
             else:
                 self.export_button.config(state=tk.DISABLED)
+                self.complete_workflow_button.config(state=tk.DISABLED)
             self.summary_text.config(state=tk.DISABLED)
         elif event_type == "ERROR":
             messagebox.showerror("Orbis Meeting AI Error", payload)
@@ -400,8 +513,40 @@ class OrbisMeetingWindow:
         )
         title_label.pack(anchor=tk.W, pady=(0, 10))
 
+        # WP-007 Google Drive Workflow Section
+        workflow_frame = ttk.LabelFrame(main_frame, text="Google Drive Workflow (Single Host Sync-Folder)", padding="10")
+        workflow_frame.pack(fill=tk.X, pady=(0, 10))
+
+        wf_row1 = ttk.Frame(workflow_frame)
+        wf_row1.pack(fill=tk.X, pady=(0, 5))
+
+        self.select_workflow_root_button = ttk.Button(
+            wf_row1,
+            text="Select Workflow Root...",
+            command=self._on_select_workflow_root_clicked,
+        )
+        self.select_workflow_root_button.pack(side=tk.LEFT, padx=(0, 10))
+
+        self.workflow_root_label = ttk.Label(
+            wf_row1,
+            text="Workflow Root: Not Configured",
+            font=("Helvetica", 9, "italic"),
+        )
+        self.workflow_root_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        wf_row2 = ttk.Frame(workflow_frame)
+        wf_row2.pack(fill=tk.X)
+
+        self.load_inbox_button = ttk.Button(
+            wf_row2,
+            text="Load Next Inbox Audio",
+            command=self._on_load_inbox_clicked,
+            state=tk.DISABLED,
+        )
+        self.load_inbox_button.pack(side=tk.LEFT)
+
         # Audio Selection Frame
-        selection_frame = ttk.LabelFrame(main_frame, text="Audio Input", padding="10")
+        selection_frame = ttk.LabelFrame(main_frame, text="Audio Input (Manual Browse)", padding="10")
         selection_frame.pack(fill=tk.X, pady=(0, 10))
 
         self.browse_button = ttk.Button(
@@ -534,7 +679,7 @@ class OrbisMeetingWindow:
         )
         self.import_status_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        # WP-005C Summary Viewer Section (PLAUD-like Layout) & WP-006 Export Action
+        # WP-005C Summary Viewer Section & WP-006 / WP-007 Actions
         summary_viewer_frame = ttk.LabelFrame(main_frame, text="Meeting Summary Viewer (PLAUD-like)", padding="10")
         summary_viewer_frame.pack(fill=tk.BOTH, expand=True)
 
@@ -561,7 +706,50 @@ class OrbisMeetingWindow:
             command=self._on_export_package_clicked,
             state=tk.DISABLED,
         )
-        self.export_button.pack(side=tk.LEFT)
+        self.export_button.pack(side=tk.LEFT, padx=(0, 10))
+
+        self.complete_workflow_button = ttk.Button(
+            export_row,
+            text="Complete Workflow Job",
+            command=self._on_complete_workflow_clicked,
+            state=tk.DISABLED,
+        )
+        self.complete_workflow_button.pack(side=tk.LEFT)
+
+    def _on_select_workflow_root_clicked(self):
+        root_dir = filedialog.askdirectory(title="Select Local Google Drive Workflow Root Directory")
+        if root_dir:
+            try:
+                paths = self.controller.set_workflow_root(root_dir)
+                messagebox.showinfo(
+                    "Workflow Initialized",
+                    f"Google Drive workflow initialized at:\n\n{paths.root}\n\nFolders verified:\n- 01_Inbox\n- 02_Processing\n- 03_Completed\n- 99_Error",
+                )
+            except Exception as e:
+                messagebox.showerror("Workflow Error", str(e))
+
+    def _on_load_inbox_clicked(self):
+        try:
+            metadata = self.controller.load_next_inbox_audio()
+            if metadata:
+                messagebox.showinfo(
+                    "Inbox Audio Claimed",
+                    f"Successfully claimed '{metadata.filename}' from 01_Inbox into 02_Processing.\nReady for transcription.",
+                )
+        except Exception as e:
+            messagebox.showwarning("Inbox Load Error", str(e))
+
+    def _on_complete_workflow_clicked(self):
+        try:
+            template = self.template_var.get()
+            result = self.controller.complete_workflow_job(template_name=template)
+            self.complete_workflow_button.config(state=tk.DISABLED)
+            messagebox.showinfo(
+                "Workflow Job Completed",
+                f"Saved to local Google Drive sync folder:\n\n{result.package_dir}\n\nGoogle Drive Desktop application handles background cloud synchronization.",
+            )
+        except Exception as e:
+            messagebox.showerror("Workflow Completion Error", str(e))
 
     def _on_browse_clicked(self):
         file_path = filedialog.askopenfilename(
@@ -583,6 +771,7 @@ class OrbisMeetingWindow:
             self.browse_button.config(state=tk.DISABLED)
             self.copy_ai_button.config(state=tk.DISABLED)
             self.export_button.config(state=tk.DISABLED)
+            self.complete_workflow_button.config(state=tk.DISABLED)
             self.controller.start_transcription()
 
     def _on_copy_ai_clicked(self):

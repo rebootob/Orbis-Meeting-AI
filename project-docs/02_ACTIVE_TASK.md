@@ -1,8 +1,8 @@
 # 02_ACTIVE_TASK.md — Active Work Package
 
 ## Work Package Details
-- **Active Work Package:** WP-006 Local Export Package
-- **Objective:** Add a local "Save Meeting Package..." workflow to the Orbis Desktop UI. When triggered by the user, export a complete meeting package folder containing `Summary.md`, `Transcript.txt`, `AI_SUMMARY_READY.md`, and `audio_reference.json` into a user-selected output directory. Ensure overwrite safety with unique sibling folder naming, atomic temp-folder write strategy, safe filename sanitization, UTF-8 Thai/English text preservation, and zero audio copying/moving or external cloud API calls.
+- **Active Work Package:** WP-007 Google Drive Multi-Device Workflow (Single Processing Host)
+- **Objective:** Implement local sync-folder workflow support for Orbis Meeting AI to enable multi-device audio submission via Google Drive Desktop without requiring Google APIs or OAuth. Orbis manages `01_Inbox`, `02_Processing`, `03_Completed`, and `99_Error` directories under a user-configured workflow root. Enforces single-processing-host operational constraint, file stability check before claiming, deterministic inbox discovery/ordering, safe claim to processing, failure handling to `99_Error` with `error.json`, and completion package export to `03_Completed` reusing WP-006.
 
 ---
 
@@ -14,50 +14,50 @@
 - `project-docs/**`
 
 ### Forbidden Changes
-- Google Drive API or cloud storage integrations
-- PDF or Word / DOCX export formats
+- Google Drive API, OAuth, service accounts, or Google Cloud SDKs
+- Distributed locking, leases, heartbeat, or multi-worker coordination
+- Automatic background daemon or watcher threads
+- PDF/Word export, Telegram/LINE, email, or database integrations
 - Live AI API calls (OpenAI, Anthropic, Gemini SDKs, HTTP requests)
-- Telegram or LINE notification adapters or stubs
-- Speaker diarization, voice profiling, or speaker recognition
-- Copying, moving, or modifying original audio files
-- Database persistence or central web/mobile backends
 
 ---
 
 ## Acceptance Criteria
-- **AC-01:** WP-001 through WP-005C remain working.
-- **AC-02:** Local export module exists (`src/orbis_meeting/export_package.py`).
-- **AC-03:** UI contains Save Meeting Package action.
-- **AC-04:** Export requires metadata + cleaned transcript + summary.
-- **AC-05:** User chooses output parent directory.
-- **AC-06:** Cancel causes no error.
-- **AC-07:** A unique meeting folder is created.
-- **AC-08:** Folder name uses safe title.
-- **AC-09:** No existing package is overwritten.
-- **AC-10:** Summary.md exists.
-- **AC-11:** Transcript.txt exists.
-- **AC-12:** AI_SUMMARY_READY.md exists.
-- **AC-13:** audio_reference.json exists.
-- **AC-14:** Summary.md uses current MeetingSummaryResult.
-- **AC-15:** Transcript.txt uses cleaned transcript.
-- **AC-16:** AI_SUMMARY_READY.md reuses WP-005B builder.
-- **AC-17:** audio_reference.json uses WP-001 metadata.
-- **AC-18:** Original audio is not modified.
-- **AC-19:** Original audio is not copied.
-- **AC-20:** Original audio is not moved.
-- **AC-21:** Thai text preserved.
-- **AC-22:** Action items render safely.
-- **AC-23:** None owner/due date render "-".
-- **AC-24:** Empty sections have stable placeholders.
-- **AC-25:** Export button disabled before summary ready.
-- **AC-26:** Export button enabled after validated summary import.
-- **AC-27:** New audio resets export readiness.
-- **AC-28:** No PDF/Word.
-- **AC-29:** No Google Drive.
-- **AC-30:** No Telegram/LINE.
-- **AC-31:** No API/network.
-- **AC-32:** No database.
-- **AC-33:** No third-party dependency.
-- **AC-34:** Focused tests pass.
-- **AC-35:** Existing tests pass.
-- **AC-36:** No scope beyond WP-006.
+- **AC-01:** WP-001 through WP-006 remain working.
+- **AC-02:** Local drive workflow module exists (`src/orbis_meeting/drive_workflow.py`).
+- **AC-03:** No Google API is used.
+- **AC-04:** Workflow root is user-configurable.
+- **AC-05:** Required 4 workflow directories can be initialized.
+- **AC-06:** Inbox discovery accepts only supported audio.
+- **AC-07:** File stability guard exists.
+- **AC-08:** Inbox ordering deterministic.
+- **AC-09:** One stable audio can be claimed into Processing.
+- **AC-10:** Claim preserves audio bytes.
+- **AC-11:** Job folder is collision-safe.
+- **AC-12:** Single Processing Host limitation is documented.
+- **AC-13:** No multi-worker locking exists.
+- **AC-14:** No watcher/daemon required.
+- **AC-15:** Existing manual Browse Audio path remains working.
+- **AC-16:** Workflow-origin job distinguished from manual-origin job.
+- **AC-17:** Workflow completion requires validated summary.
+- **AC-18:** Completion reuses WP-006 exporter.
+- **AC-19:** Completed output is created under 03_Completed.
+- **AC-20:** No existing Completed package is overwritten.
+- **AC-21:** Failure path preserves audio under 99_Error.
+- **AC-22:** error.json contains bounded error metadata.
+- **AC-23:** No failed audio silently deleted.
+- **AC-24:** UI can select/validate workflow root.
+- **AC-25:** UI can explicitly load next Inbox audio.
+- **AC-26:** UI can explicitly complete ready workflow job.
+- **AC-27:** UI never claims actual cloud upload success.
+- **AC-28:** No OAuth/API credentials.
+- **AC-29:** No Google Drive SDK.
+- **AC-30:** No database.
+- **AC-31:** No Telegram/LINE.
+- **AC-32:** No AI API.
+- **AC-33:** No web/mobile app.
+- **AC-34:** No distributed worker design.
+- **AC-35:** No new third-party dependency expected.
+- **AC-36:** Focused tests pass.
+- **AC-37:** Existing tests pass.
+- **AC-38:** No scope beyond WP-007.
