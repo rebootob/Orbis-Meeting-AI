@@ -1,22 +1,70 @@
 """
-Automatic Local Summary Engine for Orbis Meeting AI (WP-009)
+Automatic Local Summary Engine for Orbis Meeting AI (WP-009 & WP-009-R1)
 
 Local-first, provider-neutral automatic AI summarization using local subprocess commands
 (e.g., local Ollama CLI, custom script, or test doubles).
 Zero cloud API dependencies by default.
+Runtime configurable via environment variables without source code changes.
 """
 
+import os
+import json
 import subprocess
-from typing import Sequence, Optional, Any
+from typing import Sequence, Optional, Any, Dict, Tuple
 from pathlib import Path
 
-from orbis_meeting.summary import MeetingSummaryResult
-from orbis_meeting.manual_handoff import build_manual_ai_payload, import_manual_ai_result, ManualHandoffError
+from orbis_meeting.summary import MeetingSummaryResult, SummaryError, parse_and_validate_summary_response
+from orbis_meeting.manual_handoff import build_manual_ai_payload, ManualHandoffError
 
 
 class AutomaticSummaryError(RuntimeError):
     """Raised when local automatic AI summary generation or validation fails."""
     pass
+
+
+def parse_automatic_summary_response(
+    raw_response: str,
+    job_id: str = "auto_job",
+    language: str = "th",
+) -> MeetingSummaryResult:
+    """
+    Parse and validate raw JSON response string strictly for machine-to-machine automatic mode.
+
+    Rules:
+    - Must be a raw JSON object string.
+    - Surrounding whitespace is stripped.
+    - First character after stripping MUST be '{'.
+    - Last character after stripping MUST be '}'.
+    - Fenced code blocks (```json ... ```) or surrounding prose are strictly REJECTED.
+    - JSON root MUST be an object/dict.
+    - WP-004 schema validation is reused via parse_and_validate_summary_response.
+    """
+    if not raw_response or not isinstance(raw_response, str) or not raw_response.strip():
+        raise AutomaticSummaryError("Automatic AI summary response is empty.")
+
+    cleaned = raw_response.strip()
+
+    if not (cleaned.startswith("{") and cleaned.endswith("}")):
+        raise AutomaticSummaryError(
+            "Automatic AI result must contain raw JSON object text starting with '{' and ending with '}'."
+        )
+
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError as e:
+        raise AutomaticSummaryError(f"Invalid JSON format: {e}") from e
+
+    if not isinstance(data, dict):
+        raise AutomaticSummaryError("Automatic AI JSON root must be an object/dict.")
+
+    try:
+        return parse_and_validate_summary_response(
+            job_id=job_id,
+            language=language,
+            raw_response=data,
+        )
+    except SummaryError as e:
+        raise AutomaticSummaryError(f"Schema Validation Failure: {e}") from e
 
 
 class LocalCommandSummaryProvider:
@@ -126,11 +174,87 @@ class AutomaticSummaryService:
             raise AutomaticSummaryError(f"Provider generation failed: {e}") from e
 
         try:
-            summary_res = import_manual_ai_result(
-                raw_input_text=raw_response,
+            summary_res = parse_automatic_summary_response(
+                raw_response=raw_response,
                 job_id=job_id,
                 language=lang,
             )
             return summary_res
-        except ManualHandoffError as e:
+        except AutomaticSummaryError:
+            raise
+        except Exception as e:
             raise AutomaticSummaryError(f"Failed to parse/validate AI summary result: {e}") from e
+
+
+def build_auto_summary_service_from_environment(
+    env: Optional[Dict[str, str]] = None,
+) -> Tuple[Optional[AutomaticSummaryService], str]:
+    """
+    Build AutomaticSummaryService from environment variables without modifying source code.
+
+    Env vars:
+    - ORBIS_SUMMARY_COMMAND_JSON: JSON array of argv strings e.g. '["ollama", "run", "qwen3:8b"]'
+    - ORBIS_SUMMARY_TIMEOUT_SECONDS: Optional float > 0 (default 300.0)
+    - ORBIS_SUMMARY_MAX_INPUT_CHARS: Optional int > 0
+
+    Returns:
+    (service_or_none, engine_status_string)
+    Status strings:
+    - "Summary Engine: Manual Only" (when env var is absent or empty)
+    - "Summary Engine: Local Automatic Ready" (when successfully configured)
+    - "Summary Engine: Configuration Error — <detail>" (when env config is malformed)
+    """
+    if env is None:
+        env = dict(os.environ)
+
+    cmd_json = env.get("ORBIS_SUMMARY_COMMAND_JSON")
+    if cmd_json is None or not cmd_json.strip():
+        return None, "Summary Engine: Manual Only"
+
+    try:
+        command_list = json.loads(cmd_json.strip())
+    except Exception as e:
+        return None, f"Summary Engine: Configuration Error — ORBIS_SUMMARY_COMMAND_JSON is invalid JSON: {e}"
+
+    if not isinstance(command_list, list):
+        return None, "Summary Engine: Configuration Error — ORBIS_SUMMARY_COMMAND_JSON must be a JSON array."
+
+    if not command_list:
+        return None, "Summary Engine: Configuration Error — ORBIS_SUMMARY_COMMAND_JSON array cannot be empty."
+
+    for item in command_list:
+        if not isinstance(item, str):
+            return None, f"Summary Engine: Configuration Error — All argv items in ORBIS_SUMMARY_COMMAND_JSON must be strings."
+
+    timeout_seconds = 300.0
+    raw_timeout = env.get("ORBIS_SUMMARY_TIMEOUT_SECONDS")
+    if raw_timeout is not None and raw_timeout.strip():
+        try:
+            val = float(raw_timeout.strip())
+            if val <= 0:
+                return None, "Summary Engine: Configuration Error — ORBIS_SUMMARY_TIMEOUT_SECONDS must be a positive number."
+            timeout_seconds = val
+        except ValueError:
+            return None, "Summary Engine: Configuration Error — ORBIS_SUMMARY_TIMEOUT_SECONDS must be a valid number."
+
+    max_input_chars = None
+    raw_max_chars = env.get("ORBIS_SUMMARY_MAX_INPUT_CHARS")
+    if raw_max_chars is not None and raw_max_chars.strip():
+        try:
+            val = int(raw_max_chars.strip())
+            if val <= 0:
+                return None, "Summary Engine: Configuration Error — ORBIS_SUMMARY_MAX_INPUT_CHARS must be a positive integer."
+            max_input_chars = val
+        except ValueError:
+            return None, "Summary Engine: Configuration Error — ORBIS_SUMMARY_MAX_INPUT_CHARS must be a valid integer."
+
+    try:
+        provider = LocalCommandSummaryProvider(
+            command=command_list,
+            timeout_seconds=timeout_seconds,
+            max_input_chars=max_input_chars,
+        )
+        service = AutomaticSummaryService(provider=provider)
+        return service, "Summary Engine: Local Automatic Ready"
+    except Exception as e:
+        return None, f"Summary Engine: Configuration Error — {e}"

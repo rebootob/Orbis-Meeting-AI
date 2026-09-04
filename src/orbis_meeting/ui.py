@@ -42,6 +42,7 @@ from orbis_meeting.drive_workflow import (
     fail_workflow_job,
 )
 from orbis_meeting.job_runner import AutomaticJobRunner, RunnerState, JobRunnerError
+from orbis_meeting.auto_summary import build_auto_summary_service_from_environment, AutomaticSummaryService
 
 
 def format_summary_text(summary: Optional[MeetingSummaryResult]) -> str:
@@ -140,7 +141,13 @@ class OrbisMeetingController:
     ):
         self.transcription_service = transcription_service or WhisperTranscriptionService()
         self.cleanup_service = cleanup_service or TextCleanupService()
-        self.auto_summary_service = auto_summary_service
+        if auto_summary_service is not None:
+            self.auto_summary_service = auto_summary_service
+            self.summary_engine_status = "Summary Engine: Local Automatic Ready"
+        else:
+            service, status = build_auto_summary_service_from_environment()
+            self.auto_summary_service = service
+            self.summary_engine_status = status
         self.summary_template: str = "General Meeting"
         self.event_queue = event_queue if event_queue is not None else queue.Queue()
 
@@ -747,8 +754,19 @@ class OrbisMeetingWindow:
         self.transcript_text.config(state=tk.DISABLED)
 
         # WP-005B Manual AI Handoff Section
-        handoff_frame = ttk.LabelFrame(main_frame, text="Manual AI Handoff (ChatGPT / Gemini / Claude)", padding="10")
+        handoff_frame = ttk.LabelFrame(main_frame, text="Summary Engine & Manual Handoff", padding="10")
         handoff_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+
+        # Engine status label
+        engine_row = ttk.Frame(handoff_frame)
+        engine_row.pack(fill=tk.X, pady=(0, 5))
+
+        self.summary_engine_status_label = ttk.Label(
+            engine_row,
+            text=self.controller.summary_engine_status,
+            font=("Helvetica", 9, "bold" if "Ready" in self.controller.summary_engine_status else "italic"),
+        )
+        self.summary_engine_status_label.pack(side=tk.LEFT)
 
         # Template Selection & Copy Row
         template_row = ttk.Frame(handoff_frame)

@@ -1,5 +1,5 @@
 """
-Unit tests for Automatic Local Summary Engine (WP-009)
+Unit tests for Automatic Local Summary Engine (WP-009 & WP-009-R1)
 """
 
 import sys
@@ -8,10 +8,13 @@ import json
 from typing import Dict, Any
 
 from orbis_meeting.summary import MeetingSummaryResult
+from orbis_meeting.manual_handoff import import_manual_ai_result
 from orbis_meeting.auto_summary import (
     AutomaticSummaryError,
     LocalCommandSummaryProvider,
     AutomaticSummaryService,
+    parse_automatic_summary_response,
+    build_auto_summary_service_from_environment,
 )
 
 
@@ -124,16 +127,52 @@ class TestAutomaticSummaryService(unittest.TestCase):
         self.assertEqual(len(result.key_topics), 2)
         self.assertEqual(len(result.action_items), 1)
 
-    def test_summarize_success_fenced_json(self):
+    def test_summarize_rejects_fenced_json_in_automatic_mode(self):
         json_dict = create_valid_summary_json_dict()
         fenced_json = f"```json\n{json.dumps(json_dict)}\n```"
         provider = FakeProvider(response_text=fenced_json)
         service = AutomaticSummaryService(provider=provider, template_name="Project Meeting")
 
-        result = service.summarize(transcript_text="Project transcript", job_id="job_002")
+        with self.assertRaises(AutomaticSummaryError) as ctx:
+            service.summarize(transcript_text="Project transcript", job_id="job_002")
+        self.assertIn("starting with '{' and ending with '}'", str(ctx.exception))
+
+    def test_summarize_rejects_prose_before_json(self):
+        json_dict = create_valid_summary_json_dict()
+        response = f"Here is the JSON result:\n{json.dumps(json_dict)}"
+        provider = FakeProvider(response_text=response)
+        service = AutomaticSummaryService(provider=provider)
+
+        with self.assertRaises(AutomaticSummaryError) as ctx:
+            service.summarize(transcript_text="Transcript")
+        self.assertIn("starting with '{' and ending with '}'", str(ctx.exception))
+
+    def test_summarize_rejects_prose_after_json(self):
+        json_dict = create_valid_summary_json_dict()
+        response = f"{json.dumps(json_dict)}\nThank you for using Orbis."
+        provider = FakeProvider(response_text=response)
+        service = AutomaticSummaryService(provider=provider)
+
+        with self.assertRaises(AutomaticSummaryError) as ctx:
+            service.summarize(transcript_text="Transcript")
+        self.assertIn("starting with '{' and ending with '}'", str(ctx.exception))
+
+    def test_summarize_rejects_non_dict_json_root(self):
+        response = json.dumps(["title", "quick_summary"])
+        provider = FakeProvider(response_text=response)
+        service = AutomaticSummaryService(provider=provider)
+
+        with self.assertRaises(AutomaticSummaryError) as ctx:
+            service.summarize(transcript_text="Transcript")
+        self.assertTrue("starting with '{' and ending with '}'" in str(ctx.exception) or "must be an object/dict" in str(ctx.exception))
+
+    def test_manual_import_still_accepts_fenced_json(self):
+        json_dict = create_valid_summary_json_dict()
+        fenced_json = f"```json\n{json.dumps(json_dict)}\n```"
+        # WP-005B manual import must continue accepting single fenced JSON
+        result = import_manual_ai_result(fenced_json)
         self.assertIsInstance(result, MeetingSummaryResult)
         self.assertEqual(result.title, "Project Sync Meeting")
-        self.assertIn("TEMPLATE FOCUS: Project Meeting", provider.last_prompt)
 
     def test_summarize_invalid_template(self):
         provider = FakeProvider(response_text="{}")
@@ -143,11 +182,11 @@ class TestAutomaticSummaryService(unittest.TestCase):
         self.assertIn("Failed to build summary prompt", str(ctx.exception))
 
     def test_summarize_invalid_json(self):
-        provider = FakeProvider(response_text="This is plain text without JSON object.")
+        provider = FakeProvider(response_text="{invalid json}")
         service = AutomaticSummaryService(provider=provider)
         with self.assertRaises(AutomaticSummaryError) as ctx:
             service.summarize("Transcript")
-        self.assertIn("Failed to parse/validate AI summary result", str(ctx.exception))
+        self.assertIn("Invalid JSON format", str(ctx.exception))
 
     def test_summarize_schema_validation_failure(self):
         incomplete_json = json.dumps({"title": "Incomplete Summary"})
@@ -163,6 +202,81 @@ class TestAutomaticSummaryService(unittest.TestCase):
         with self.assertRaises(AutomaticSummaryError) as ctx:
             service.summarize("Transcript")
         self.assertIn("Fake provider execution failure", str(ctx.exception))
+
+
+class TestEnvironmentConfiguration(unittest.TestCase):
+
+    def test_env_absent_returns_manual_only(self):
+        service, status = build_auto_summary_service_from_environment(env={})
+        self.assertIsNone(service)
+        self.assertEqual(status, "Summary Engine: Manual Only")
+
+    def test_env_valid_json_argv_creates_service(self):
+        env = {
+            "ORBIS_SUMMARY_COMMAND_JSON": '["ollama", "run", "qwen3:8b"]',
+            "ORBIS_SUMMARY_TIMEOUT_SECONDS": "120.0",
+            "ORBIS_SUMMARY_MAX_INPUT_CHARS": "100000",
+        }
+        service, status = build_auto_summary_service_from_environment(env=env)
+        self.assertIsNotNone(service)
+        self.assertEqual(status, "Summary Engine: Local Automatic Ready")
+        self.assertEqual(service.provider.command, ["ollama", "run", "qwen3:8b"])
+        self.assertEqual(service.provider.timeout_seconds, 120.0)
+        self.assertEqual(service.provider.max_input_chars, 100000)
+
+    def test_env_malformed_json_returns_config_error(self):
+        env = {"ORBIS_SUMMARY_COMMAND_JSON": '["ollama", "run"'}
+        service, status = build_auto_summary_service_from_environment(env=env)
+        self.assertIsNone(service)
+        self.assertIn("Configuration Error", status)
+        self.assertIn("invalid JSON", status)
+
+    def test_env_not_array_returns_config_error(self):
+        env = {"ORBIS_SUMMARY_COMMAND_JSON": '{"cmd": "ollama"}'}
+        service, status = build_auto_summary_service_from_environment(env=env)
+        self.assertIsNone(service)
+        self.assertIn("Configuration Error", status)
+        self.assertIn("must be a JSON array", status)
+
+    def test_env_empty_array_returns_config_error(self):
+        env = {"ORBIS_SUMMARY_COMMAND_JSON": '[]'}
+        service, status = build_auto_summary_service_from_environment(env=env)
+        self.assertIsNone(service)
+        self.assertIn("Configuration Error", status)
+        self.assertIn("cannot be empty", status)
+
+    def test_env_non_string_item_returns_config_error(self):
+        env = {"ORBIS_SUMMARY_COMMAND_JSON": '["ollama", 123]'}
+        service, status = build_auto_summary_service_from_environment(env=env)
+        self.assertIsNone(service)
+        self.assertIn("Configuration Error", status)
+        self.assertIn("must be strings", status)
+
+    def test_env_timeout_validation(self):
+        env_bad_val = {
+            "ORBIS_SUMMARY_COMMAND_JSON": '["ollama"]',
+            "ORBIS_SUMMARY_TIMEOUT_SECONDS": "not_a_number",
+        }
+        service, status = build_auto_summary_service_from_environment(env=env_bad_val)
+        self.assertIsNone(service)
+        self.assertIn("Configuration Error", status)
+
+        env_negative = {
+            "ORBIS_SUMMARY_COMMAND_JSON": '["ollama"]',
+            "ORBIS_SUMMARY_TIMEOUT_SECONDS": "-10",
+        }
+        service, status = build_auto_summary_service_from_environment(env=env_negative)
+        self.assertIsNone(service)
+        self.assertIn("Configuration Error", status)
+
+    def test_env_max_input_validation(self):
+        env_bad_val = {
+            "ORBIS_SUMMARY_COMMAND_JSON": '["ollama"]',
+            "ORBIS_SUMMARY_MAX_INPUT_CHARS": "invalid",
+        }
+        service, status = build_auto_summary_service_from_environment(env=env_bad_val)
+        self.assertIsNone(service)
+        self.assertIn("Configuration Error", status)
 
 
 if __name__ == "__main__":
