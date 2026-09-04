@@ -45,7 +45,9 @@ class FakeSummaryProvider(SummaryProvider):
         if self.response_dict is not None:
             return self.response_dict
         return {
+            "title": "การประชุมพัฒนาระบบ Kintone และ QA HOLD",
             "quick_summary": "สรุปสั้น: ทบทวนแผนงาน Kintone และ QA HOLD",
+            "key_topics": ["การพัฒนาระบบ Kintone", "การเปิดตัว QA HOLD", "กรอบเวลา WP-004"],
             "full_summary": "สรุปละเอียด: ที่ประชุมหารือเรื่องการพัฒนาระบบ Kintone และเปิดตัว QA HOLD...",
             "decisions": ["อนุมัติกรอบเวลา WP-004"],
             "action_items": [
@@ -78,7 +80,10 @@ class TestSummary(unittest.TestCase):
         self.assertIsInstance(result, MeetingSummaryResult)
         self.assertEqual(result.job_id, "test_job_summary_001")
         self.assertEqual(result.language, "th")
+        self.assertEqual(result.title, "การประชุมพัฒนาระบบ Kintone และ QA HOLD")
         self.assertIn("Kintone", result.quick_summary)
+        self.assertEqual(len(result.key_topics), 3)
+        self.assertIn("การพัฒนาระบบ Kintone", result.key_topics)
         self.assertEqual(len(result.decisions), 1)
         self.assertEqual(result.decisions[0], "อนุมัติกรอบเวลา WP-004")
 
@@ -90,7 +95,9 @@ class TestSummary(unittest.TestCase):
             segments=[TranscriptionSegment(start=0.0, end=5.0, text="Welcome to the meeting. We decided to adopt Kintone.")],
         )
         en_response = {
+            "title": "Kintone Adoption Planning",
             "quick_summary": "Quick Summary: Adopted Kintone.",
+            "key_topics": ["Kintone Adoption", "Deployment Timeline"],
             "full_summary": "Full Summary: Detailed discussion on adopting Kintone.",
             "decisions": ["Adopt Kintone"],
             "action_items": [{"task": "Deploy Kintone", "owner": "John", "due_date": "2026-09-15"}],
@@ -102,12 +109,16 @@ class TestSummary(unittest.TestCase):
 
         result = service.summarize(en_transcript)
         self.assertEqual(result.language, "en")
+        self.assertEqual(result.title, "Kintone Adoption Planning")
         self.assertEqual(result.quick_summary, "Quick Summary: Adopted Kintone.")
+        self.assertEqual(len(result.key_topics), 2)
         self.assertEqual(result.action_items[0].owner, "John")
 
     def test_action_item_owner_and_due_date_nullability(self):
         fake_response = {
+            "title": "Project Task Review",
             "quick_summary": "Quick summary test",
+            "key_topics": ["Task Distribution"],
             "full_summary": "Full summary test",
             "decisions": [],
             "action_items": [
@@ -138,6 +149,78 @@ class TestSummary(unittest.TestCase):
         self.assertIsNone(items[3].owner)
         self.assertIsNone(items[3].due_date)
 
+    def test_title_mapping_and_no_external_metadata(self):
+        provider = FakeSummaryProvider()
+        service = MeetingSummaryService(provider=provider)
+        result = service.summarize(self.sample_transcript)
+
+        self.assertIsInstance(result.title, str)
+        self.assertTrue(len(result.title.strip()) > 0)
+        # Title is derived purely from transcript content via SummaryRequest
+        last_req = provider.last_request
+        self.assertIsNotNone(last_req)
+        self.assertEqual(last_req.transcript_text, self.sample_transcript.full_text)
+
+    def test_empty_title_rejection(self):
+        bad_resp = {
+            "title": "   ",
+            "quick_summary": "Quick summary",
+            "key_topics": ["Topic 1"],
+            "full_summary": "Full summary",
+            "decisions": [],
+            "action_items": [],
+            "risks": [],
+            "follow_up": [],
+        }
+        provider = FakeSummaryProvider(response_dict=bad_resp)
+        service = MeetingSummaryService(provider=provider)
+        with self.assertRaises(SummaryError) as ctx:
+            service.summarize(self.sample_transcript)
+        self.assertIn("title", str(ctx.exception))
+
+    def test_wrong_title_type_rejection(self):
+        bad_resp = {
+            "title": 12345,  # wrong type
+            "quick_summary": "Quick summary",
+            "key_topics": ["Topic 1"],
+            "full_summary": "Full summary",
+            "decisions": [],
+            "action_items": [],
+            "risks": [],
+            "follow_up": [],
+        }
+        provider = FakeSummaryProvider(response_dict=bad_resp)
+        service = MeetingSummaryService(provider=provider)
+        with self.assertRaises(SummaryError) as ctx:
+            service.summarize(self.sample_transcript)
+        self.assertIn("title", str(ctx.exception))
+
+    def test_key_topics_mapping(self):
+        provider = FakeSummaryProvider()
+        service = MeetingSummaryService(provider=provider)
+        result = service.summarize(self.sample_transcript)
+
+        self.assertIsInstance(result.key_topics, list)
+        self.assertEqual(len(result.key_topics), 3)
+        self.assertEqual(result.key_topics[0], "การพัฒนาระบบ Kintone")
+
+    def test_wrong_key_topics_type_rejection(self):
+        bad_resp = {
+            "title": "Valid Title",
+            "quick_summary": "Quick summary",
+            "key_topics": "not a list",  # wrong type
+            "full_summary": "Full summary",
+            "decisions": [],
+            "action_items": [],
+            "risks": [],
+            "follow_up": [],
+        }
+        provider = FakeSummaryProvider(response_dict=bad_resp)
+        service = MeetingSummaryService(provider=provider)
+        with self.assertRaises(SummaryError) as ctx:
+            service.summarize(self.sample_transcript)
+        self.assertIn("key_topics", str(ctx.exception))
+
     def test_privacy_and_payload_isolation(self):
         provider = FakeSummaryProvider()
         service = MeetingSummaryService(provider=provider)
@@ -156,7 +239,8 @@ class TestSummary(unittest.TestCase):
     def test_prompt_rules_verification(self):
         prompt = build_summary_prompt("th")
 
-        # Confirm rules required by AC-19, AC-20, AC-21, AC-22
+        self.assertIn("descriptive meeting title", prompt)
+        self.assertIn("key topics", prompt)
         self.assertIn("Do not fabricate", prompt)
         self.assertIn("set owner to null", prompt)
         self.assertIn("set due_date to null", prompt)
@@ -176,10 +260,10 @@ class TestSummary(unittest.TestCase):
 
     def test_missing_required_field_rejection(self):
         invalid_responses = [
-            {"full_summary": "text", "decisions": [], "action_items": [], "risks": [], "follow_up": []},
-            {"quick_summary": "text", "decisions": [], "action_items": [], "risks": [], "follow_up": []},
-            {"quick_summary": "text", "full_summary": "text", "action_items": [], "risks": [], "follow_up": []},
-            {"quick_summary": "text", "full_summary": "text", "decisions": [], "risks": [], "follow_up": []},
+            {"title": "t", "full_summary": "text", "key_topics": [], "decisions": [], "action_items": [], "risks": [], "follow_up": []},
+            {"title": "t", "quick_summary": "text", "key_topics": [], "decisions": [], "action_items": [], "risks": [], "follow_up": []},
+            {"quick_summary": "text", "key_topics": [], "full_summary": "text", "decisions": [], "action_items": [], "risks": [], "follow_up": []},
+            {"title": "t", "quick_summary": "text", "full_summary": "text", "decisions": [], "action_items": [], "risks": [], "follow_up": []},
         ]
 
         for bad_resp in invalid_responses:
@@ -190,10 +274,10 @@ class TestSummary(unittest.TestCase):
 
     def test_wrong_type_rejection(self):
         bad_types = [
-            {"quick_summary": 123, "full_summary": "text", "decisions": [], "action_items": [], "risks": [], "follow_up": []},
-            {"quick_summary": "text", "full_summary": "text", "decisions": "not a list", "action_items": [], "risks": [], "follow_up": []},
-            {"quick_summary": "text", "full_summary": "text", "decisions": [], "action_items": "not a list", "risks": [], "follow_up": []},
-            {"quick_summary": "text", "full_summary": "text", "decisions": [], "action_items": [{"task": 123}], "risks": [], "follow_up": []},
+            {"title": "t", "quick_summary": 123, "key_topics": [], "full_summary": "text", "decisions": [], "action_items": [], "risks": [], "follow_up": []},
+            {"title": "t", "quick_summary": "text", "key_topics": [], "full_summary": "text", "decisions": "not a list", "action_items": [], "risks": [], "follow_up": []},
+            {"title": "t", "quick_summary": "text", "key_topics": [], "full_summary": "text", "decisions": [], "action_items": "not a list", "risks": [], "follow_up": []},
+            {"title": "t", "quick_summary": "text", "key_topics": [], "full_summary": "text", "decisions": [], "action_items": [{"task": 123}], "risks": [], "follow_up": []},
         ]
 
         for bad_resp in bad_types:
@@ -204,7 +288,9 @@ class TestSummary(unittest.TestCase):
 
     def test_empty_summary_text_rejection(self):
         bad_resp = {
+            "title": "Title",
             "quick_summary": "   ",
+            "key_topics": [],
             "full_summary": "Full summary",
             "decisions": [],
             "action_items": [],

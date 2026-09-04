@@ -34,7 +34,9 @@ class MeetingSummaryResult:
     """Structured meeting summary output matching V1 output contract."""
     job_id: str
     language: str
+    title: str
     quick_summary: str
+    key_topics: List[str]
     full_summary: str
     decisions: List[str]
     action_items: List[ActionItem]
@@ -45,7 +47,9 @@ class MeetingSummaryResult:
         return {
             "job_id": self.job_id,
             "language": self.language,
+            "title": self.title,
             "quick_summary": self.quick_summary,
+            "key_topics": list(self.key_topics),
             "full_summary": self.full_summary,
             "decisions": list(self.decisions),
             "action_items": [item.to_dict() for item in self.action_items],
@@ -82,15 +86,17 @@ def build_summary_prompt(language: str) -> str:
     return (
         "You are an executive meeting assistant. Summarize the provided meeting transcript.\n"
         "RULES:\n"
-        "1. Do not fabricate or hallucinate any information not present in the transcript.\n"
-        "2. Use only the supplied transcript content.\n"
-        "3. Preserve all exact names, dates, numbers, and technical terms.\n"
-        "4. If an action item task has no explicit owner, set owner to null.\n"
-        "5. If an action item task has no explicit due date, set due_date to null.\n"
-        "6. Decisions must be explicitly stated or strongly supported in the transcript.\n"
-        "7. Return output strictly matching the JSON schema with keys: "
-        "quick_summary, full_summary, decisions, action_items, risks, follow_up.\n"
-        "8. Return JSON output directly. Do not include reasoning steps, commentary, or markdown formatting."
+        "1. Generate a concise, descriptive meeting title reflecting the main purpose (avoid generic titles like 'Meeting Summary').\n"
+        "2. Generate major key topics discussed (without duplicating decisions or action items).\n"
+        "3. Do not fabricate or hallucinate any information not present in the transcript.\n"
+        "4. Use only the supplied transcript content.\n"
+        "5. Preserve all exact names, dates, numbers, and technical terms.\n"
+        "6. If an action item task has no explicit owner, set owner to null.\n"
+        "7. If an action item task has no explicit due date, set due_date to null.\n"
+        "8. Decisions must be explicitly stated or strongly supported in the transcript.\n"
+        "9. Return output strictly matching the JSON schema with keys: "
+        "title, quick_summary, key_topics, full_summary, decisions, action_items, risks, follow_up.\n"
+        "10. Return JSON output directly. Do not include reasoning steps, commentary, or markdown formatting."
     )
 
 
@@ -108,9 +114,17 @@ def parse_and_validate_summary_response(
             f"Provider response for job_id '{job_id}' must be a dictionary, got {type(raw_response).__name__}."
         )
 
+    title = raw_response.get("title")
+    if not isinstance(title, str) or not title.strip():
+        raise SummaryError(f"Invalid or missing 'title' for job_id '{job_id}'. Must be a non-empty string.")
+
     quick_summary = raw_response.get("quick_summary")
     if not isinstance(quick_summary, str) or not quick_summary.strip():
         raise SummaryError(f"Invalid or missing 'quick_summary' for job_id '{job_id}'. Must be a non-empty string.")
+
+    key_topics_raw = raw_response.get("key_topics")
+    if not isinstance(key_topics_raw, list) or not all(isinstance(item, str) for item in key_topics_raw):
+        raise SummaryError(f"Invalid 'key_topics' for job_id '{job_id}'. Must be a list of strings.")
 
     full_summary = raw_response.get("full_summary")
     if not isinstance(full_summary, str) or not full_summary.strip():
@@ -160,7 +174,9 @@ def parse_and_validate_summary_response(
     return MeetingSummaryResult(
         job_id=job_id,
         language=language,
+        title=title.strip(),
         quick_summary=quick_summary.strip(),
+        key_topics=[kt.strip() for kt in key_topics_raw if isinstance(kt, str) and kt.strip()],
         full_summary=full_summary.strip(),
         decisions=[d.strip() for d in decisions_raw if isinstance(d, str) and d.strip()],
         action_items=action_items,
