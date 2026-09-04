@@ -8,8 +8,8 @@
    3. `project-docs/02_ACTIVE_TASK.md`
    4. `project-docs/04_SCOPE_BOUNDARY.md`
    Read other documents only when directly relevant.
-2. **WP-000 through WP-007 Status:** WP-000, WP-001, WP-002, WP-003, WP-004, WP-005A, WP-005B, WP-005C, WP-006, and WP-007 are PASS / CLOSED.
-3. **WP-008 Status:** WP-008 Automatic Job Runner is authorized and active.
+2. **WP-000 through WP-008 Status:** WP-000, WP-001, WP-002, WP-003, WP-004, WP-005A, WP-005B, WP-005C, WP-006, WP-007, and WP-008 are PASS / CLOSED.
+3. **WP-009 Status:** WP-009 Automatic Summary Engine is authorized and active (IN PROGRESS).
 4. **Do Not Auto-Start Future WPs:** Do not automatically launch subsequent Work Packages without explicit human Owner approval.
 5. **Do Not Expand Scope:** Enforce locked V1 scope boundaries. Reject any premature requests for web apps, mobile apps, Google Drive API, Telegram, LINE, databases, or speaker diarization.
 6. **Use Antigravity Only When Necessary and Authorized:** Assign code implementation tasks to Antigravity only when explicitly authorized by the Owner.

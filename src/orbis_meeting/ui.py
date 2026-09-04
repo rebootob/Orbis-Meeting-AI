@@ -130,6 +130,7 @@ class OrbisMeetingController:
         self,
         transcription_service: Optional[Any] = None,
         cleanup_service: Optional[Any] = None,
+        auto_summary_service: Optional[Any] = None,
         event_queue: Optional[queue.Queue] = None,
         status_callback: Optional[Callable[[str], None]] = None,
         metadata_callback: Optional[Callable[[Optional[AudioJobMetadata]], None]] = None,
@@ -139,6 +140,8 @@ class OrbisMeetingController:
     ):
         self.transcription_service = transcription_service or WhisperTranscriptionService()
         self.cleanup_service = cleanup_service or TextCleanupService()
+        self.auto_summary_service = auto_summary_service
+        self.summary_template: str = "General Meeting"
         self.event_queue = event_queue if event_queue is not None else queue.Queue()
 
         self.status_callback = status_callback

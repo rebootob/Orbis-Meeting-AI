@@ -427,6 +427,69 @@ class TestAutomaticJobRunnerModule(unittest.TestCase):
         self.assertEqual(len(list(self.paths.error.iterdir())), 0)
 
 
+    def test_auto_summary_service_success(self):
+        from test_auto_summary import FakeProvider, create_valid_summary_json_dict
+        from orbis_meeting.auto_summary import AutomaticSummaryService
+
+        valid_json = json.dumps(create_valid_summary_json_dict())
+        self.controller.auto_summary_service = AutomaticSummaryService(
+            provider=FakeProvider(response_text=valid_json),
+            template_name="General Meeting",
+        )
+
+        audio = self.paths.inbox / "auto_summary_job.mp3"
+        audio.write_bytes(b"auto summary audio bytes 123")
+
+        claimed = self.runner.run_once()
+        self.assertEqual(claimed, "auto_summary_job.mp3")
+
+        # Runner transitions to SUMMARY_READY
+        self.assertEqual(self.runner.state, RunnerState.SUMMARY_READY)
+
+        # current_summary_result is set
+        self.assertIsNotNone(self.controller.current_summary_result)
+        self.assertEqual(self.controller.current_summary_result.title, "Project Sync Meeting")
+
+        # Job remains in 02_Processing (complete_workflow_job is NOT called automatically)
+        self.assertTrue(self.controller.current_workflow_job_dir.exists())
+        self.assertEqual(self.controller.current_workflow_job_dir.parent, self.paths.processing)
+
+        # Complete Workflow Job can be called manually by user/controller
+        res = self.controller.complete_workflow_job()
+        self.assertTrue(res.package_dir.exists())
+
+    def test_auto_summary_service_failure_preserves_job_in_processing_for_manual_fallback(self):
+        from test_auto_summary import FakeProvider
+        from orbis_meeting.auto_summary import AutomaticSummaryService
+
+        self.controller.auto_summary_service = AutomaticSummaryService(
+            provider=FakeProvider(response_text="Invalid non-JSON response"),
+            template_name="General Meeting",
+        )
+
+        audio = self.paths.inbox / "summary_fail_job.mp3"
+        audio.write_bytes(b"summary fail audio bytes")
+
+        claimed = self.runner.run_once()
+        self.assertEqual(claimed, "summary_fail_job.mp3")
+
+        # Runner transitions to SUMMARY_ERROR
+        self.assertEqual(self.runner.state, RunnerState.SUMMARY_ERROR)
+
+        # current_summary_result is None, but current_transcript_result is preserved
+        self.assertIsNone(self.controller.current_summary_result)
+        self.assertIsNotNone(self.controller.current_transcript_result)
+
+        # Job is NOT sent to 99_Error; stays in 02_Processing
+        self.assertEqual(len(list(self.paths.error.iterdir())), 0)
+        self.assertTrue(self.controller.current_workflow_job_dir.exists())
+        self.assertEqual(self.controller.current_workflow_job_dir.parent, self.paths.processing)
+
+        # Manual Copy for AI and Manual Import AI result still work as fallback
+        payload = self.controller.copy_ai_payload()
+        self.assertIn("Cleaned", payload)
+
+
 if __name__ == "__main__":
     unittest.main()
 

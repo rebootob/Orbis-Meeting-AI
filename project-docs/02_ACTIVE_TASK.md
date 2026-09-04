@@ -1,8 +1,8 @@
 # 02_ACTIVE_TASK.md — Active Work Package
 
 ## Work Package Details
-- **Active Work Package:** WP-008 Automatic Job Runner (Single-Host Ingestion & Processing)
-- **Objective:** Implement a single-host automatic job runner (`src/orbis_meeting/job_runner.py`) that periodically scans `01_Inbox`, checks file stability using real WP-007 stability logic, claims the oldest stable audio into `02_Processing`, runs Whisper transcription and text cleanup automatically, stores the cleaned transcript result in session state, and pauses at `WAITING_FOR_SUMMARY`. The runner processes only one active workflow job at a time, routes per-job failures to `99_Error`, survives job failures, and allows existing manual AI handoff / complete workflow job steps to finish the meeting lifecycle before resuming on subsequent scans.
+- **Active Work Package:** WP-009 Automatic Summary Engine (Local-First / Provider-Neutral / Zero Cloud API)
+- **Objective:** Implement local automatic summary generation (`src/orbis_meeting/auto_summary.py`) using a provider-neutral local command interface (`LocalCommandSummaryProvider`, `AutomaticSummaryService`). Integrate with `AutomaticJobRunner` (`src/orbis_meeting/job_runner.py`) so that after transcription and text cleanup succeed, if an automatic summary service is configured, the runner automatically transitions through `SUMMARIZING`, parses/validates raw JSON into a canonical `MeetingSummaryResult`, updates session state, and transitions to `SUMMARY_READY`. If summary generation fails or is unconfigured, the job is preserved safely for manual AI handoff without routing to `99_Error`.
 
 ---
 
@@ -14,8 +14,10 @@
 - `project-docs/**`
 
 ### Forbidden Changes
-- Automatic AI summary generation (OpenAI, Gemini, Claude, local LLMs)
-- Google Drive API, OAuth, service accounts, or Google Cloud SDKs
+- Cloud AI APIs (OpenAI, Gemini, Claude, HTTP requests)
+- Ollama CLI / LLM model downloads or installs during WP-009
+- Shell injection / `shell=True` in subprocess calls
+- Automatic call to `complete_workflow_job()` (belongs to WP-010)
 - Multi-host coordination, distributed locks, or multi-worker concurrency
 - Telegram, LINE, email, PDF/Word export, databases, or web/mobile UIs
 - External schedulers, OS services, cron, or asyncio rewrites
@@ -23,39 +25,16 @@
 ---
 
 ## Acceptance Criteria
-- **AC-01:** WP-001 through WP-007 remain working.
-- **AC-02:** Automatic job runner module exists (`src/orbis_meeting/job_runner.py`).
-- **AC-03:** Single Processing Host model preserved.
-- **AC-04:** Runner can start/stop cleanly.
-- **AC-05:** Runner periodically scans Inbox.
-- **AC-06:** No busy loop (uses `threading.Event` wait).
-- **AC-07:** Real stability guard reused.
-- **AC-08:** Unstable file remains in Inbox.
-- **AC-09:** Oldest deterministic file selected.
-- **AC-10:** Only one active workflow job at a time.
-- **AC-11:** Audio auto-claimed into Processing.
-- **AC-12:** Whisper runs automatically after claim.
-- **AC-13:** Cleanup runs automatically after transcription.
-- **AC-14:** Result stored as cleaned transcript.
-- **AC-15:** Runner stops at WAITING_FOR_SUMMARY.
-- **AC-16:** No summary generated automatically.
-- **AC-17:** Existing manual AI handoff remains usable.
-- **AC-18:** Existing workflow Complete remains usable.
-- **AC-19:** No second job claimed while waiting for summary.
-- **AC-20:** After Complete, runner can resume.
-- **AC-21:** Processing failure routes to Error (`99_Error`).
-- **AC-22:** Failed audio preserved in Error directory.
-- **AC-23:** Runner survives per-job failure.
-- **AC-24:** Manual mode remains usable when runner stopped.
-- **AC-25:** Manual mode cannot corrupt active auto workflow.
-- **AC-26:** Tk thread safety preserved (queue events, no direct widget calls).
-- **AC-27:** No Google API/OAuth.
-- **AC-28:** No AI API.
-- **AC-29:** No local LLM yet.
-- **AC-30:** No Telegram/LINE.
-- **AC-31:** No database.
-- **AC-32:** No multi-worker.
-- **AC-33:** No external scheduler.
-- **AC-34:** No third-party dependency expected.
-- **AC-35:** Focused and full tests pass.
-- **AC-36:** No scope beyond WP-008.
+- **AC-01:** WP-001 through WP-008 remain working.
+- **AC-02:** `src/orbis_meeting/auto_summary.py` created with `AutomaticSummaryError`, `LocalCommandSummaryProvider`, `AutomaticSummaryService`.
+- **AC-03:** Local provider executes command via stdlib `subprocess` without `shell=True`.
+- **AC-04:** Complete prompt passed via stdin without truncation (or raises error if `max_input_chars` exceeded).
+- **AC-05:** Reuses WP-004 `MeetingSummaryResult` schema & strict JSON validation via `import_manual_ai_result`.
+- **AC-06:** Runner states extended with `SUMMARIZING`, `SUMMARY_READY`, `SUMMARY_ERROR`.
+- **AC-07:** Runner automatically executes summary after cleanup when service is configured.
+- **AC-08:** `current_summary_result` populated and `SUMMARY_IMPORTED` emitted on success.
+- **AC-09:** Automatic summary failure transitions to `SUMMARY_ERROR`, preserving job in `02_Processing` for manual AI fallback.
+- **AC-10:** Single-job policy & stop drain safety preserved.
+- **AC-11:** `complete_workflow_job()` is NOT called automatically in WP-009.
+- **AC-12:** Zero cloud AI API calls.
+- **AC-13:** Focused and full tests pass.

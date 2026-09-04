@@ -43,6 +43,9 @@ class RunnerState(str, Enum):
     TRANSCRIBING = "TRANSCRIBING"
     CLEANING = "CLEANING"
     WAITING_FOR_SUMMARY = "WAITING_FOR_SUMMARY"
+    SUMMARIZING = "SUMMARIZING"
+    SUMMARY_READY = "SUMMARY_READY"
+    SUMMARY_ERROR = "SUMMARY_ERROR"
     ERROR = "ERROR"
 
 
@@ -201,7 +204,14 @@ class AutomaticJobRunner:
         # If there is already an active workflow job in processing or waiting for summary, pause scanning.
         if self.controller.job_origin == "WORKFLOW" and self.controller.current_workflow_job_dir is not None:
             if self.controller.current_transcript_result is not None:
-                new_state = RunnerState.STOPPING if self._stop_event.is_set() else RunnerState.WAITING_FOR_SUMMARY
+                if self.state in (RunnerState.SUMMARY_READY, RunnerState.SUMMARY_ERROR, RunnerState.WAITING_FOR_SUMMARY):
+                    target_state = self.state
+                elif self.controller.current_summary_result is not None:
+                    target_state = RunnerState.SUMMARY_READY
+                else:
+                    target_state = RunnerState.WAITING_FOR_SUMMARY
+
+                new_state = RunnerState.STOPPING if self._stop_event.is_set() else target_state
                 self._set_state(new_state, self.controller.current_metadata.filename if self.controller.current_metadata else None)
             return None
 
@@ -279,19 +289,61 @@ class AutomaticJobRunner:
 
             cleaned_result = self.controller.cleanup_service.clean_transcript(raw_result)
 
-            # Step 7: Store Transcript Result & Pause at WAITING_FOR_SUMMARY
+            # Step 7: Store Transcript Result
             self.controller.current_transcript_result = cleaned_result
             self.controller.state = "COMPLETED"
             self.controller.is_processing = False
 
             if self.event_queue:
                 self.event_queue.put(("TRANSCRIPT", cleaned_result.full_text))
-                self.event_queue.put(("STATUS", f"WORKFLOW AUTO: Cleaned transcript ready. WAITING_FOR_SUMMARY."))
                 self.event_queue.put(("COMPLETE", None))
 
-            final_state = RunnerState.STOPPING if self._stop_event.is_set() else RunnerState.WAITING_FOR_SUMMARY
-            self._set_state(final_state, metadata.filename)
-            return metadata.filename
+            # Step 8: Automatic Summary Generation (WP-009)
+            auto_summary_service = getattr(self.controller, "auto_summary_service", None)
+            if auto_summary_service is not None:
+                self._set_state(
+                    RunnerState.STOPPING if self._stop_event.is_set() else RunnerState.SUMMARIZING,
+                    metadata.filename,
+                )
+                if self.event_queue:
+                    self.event_queue.put(("STATUS", f"WORKFLOW AUTO: Generating local AI summary for {metadata.filename}..."))
+
+                try:
+                    template_name = getattr(self.controller, "summary_template", "General Meeting")
+                    summary_res = auto_summary_service.summarize(
+                        transcript_text=cleaned_result.full_text,
+                        job_id=metadata.job_id,
+                        template_name=template_name,
+                        language=cleaned_result.language,
+                    )
+                    self.controller.current_summary_result = summary_res
+
+                    if self.event_queue:
+                        self.event_queue.put(("SUMMARY_IMPORTED", summary_res))
+                        self.event_queue.put(("STATUS", f"WORKFLOW AUTO: Local AI summary ready for {metadata.filename}."))
+
+                    final_state = RunnerState.STOPPING if self._stop_event.is_set() else RunnerState.SUMMARY_READY
+                    self._set_state(final_state, metadata.filename)
+                    return metadata.filename
+
+                except Exception as e:
+                    # Automatic summary failure:
+                    # Transition to SUMMARY_ERROR, preserve cleaned transcript and job in 02_Processing.
+                    # Do NOT route to 99_Error. Allow manual AI handoff fallback.
+                    if self.event_queue:
+                        self.event_queue.put(("ERROR", f"Auto Summary Error: {e}"))
+                        self.event_queue.put(("STATUS", f"WORKFLOW AUTO SUMMARY ERROR: {e}. Cleaned transcript preserved in 02_Processing."))
+
+                    err_state = RunnerState.STOPPING if self._stop_event.is_set() else RunnerState.SUMMARY_ERROR
+                    self._set_state(err_state, metadata.filename)
+                    return metadata.filename
+            else:
+                if self.event_queue:
+                    self.event_queue.put(("STATUS", f"WORKFLOW AUTO: Cleaned transcript ready. WAITING_FOR_SUMMARY."))
+
+                final_state = RunnerState.STOPPING if self._stop_event.is_set() else RunnerState.WAITING_FOR_SUMMARY
+                self._set_state(final_state, metadata.filename)
+                return metadata.filename
 
         except Exception as e:
             # Per-Job Failure Routing to 99_Error
