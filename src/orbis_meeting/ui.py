@@ -286,6 +286,7 @@ class OrbisMeetingController:
         """
         Discover, claim, and intake the next stable audio file from 01_Inbox.
         Sets job_origin = "WORKFLOW".
+        Raises DriveWorkflowError if no workflow root or no stable inbox audio.
         """
         if not self.workflow_paths:
             raise DriveWorkflowError("Workflow root is not initialized. Please select a workflow root first.")
@@ -312,25 +313,23 @@ class OrbisMeetingController:
             self.current_transcript_result = None
             self.current_summary_result = None
             self.state = "AUDIO_SELECTED"
+
             self._emit_event("METADATA", metadata)
             self._emit_event("SUMMARY_IMPORTED", None)
-            self._emit_event("STATUS", f"WORKFLOW INBOX CLAIMED: {metadata.filename}")
+            self._emit_event("STATUS", f"WORKFLOW: Claimed {metadata.filename} into 02_Processing.")
             return metadata
         except Exception as e:
-            if 'job_dir' in locals() and job_dir:
+            # If claim failed after file was partially touched or on error, fail safely if created
+            if 'job_dir' in locals() and job_dir and job_dir.exists():
                 fail_workflow_job(
                     paths=self.workflow_paths,
                     job_id=next_audio.stem,
                     audio_filename=next_audio.name,
-                    audio_path=next_audio,
+                    audio_path=target_audio if 'target_audio' in locals() else next_audio,
                     job_dir=job_dir,
                     stage="Claim/Intake",
                     error_message=str(e),
                 )
-            self.job_origin = "MANUAL"
-            self.current_workflow_job_dir = None
-            self.current_workflow_audio_path = None
-            self._set_error(f"Workflow Inbox Claim Error: {e}")
             raise DriveWorkflowError(f"Failed to claim inbox audio '{next_audio.name}': {e}") from e
 
     def complete_workflow_job(
@@ -529,6 +528,7 @@ class OrbisMeetingController:
     def _set_error(self, message: str):
         self.state = "ERROR"
         self._emit_event("ERROR", message)
+        self._emit_event("STATUS", f"ERROR: {message}")
 
 
 class OrbisMeetingWindow:

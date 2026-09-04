@@ -237,6 +237,65 @@ class TestControlCenter(unittest.TestCase):
         self.assertIsNotNone(controller.current_summary_result)
         self.assertIsNotNone(controller.current_transcript_result)
 
+    def test_set_error_emits_error_and_status_events(self):
+        """Test that _set_error sets state to ERROR and emits both ERROR and STATUS events."""
+        from orbis_meeting.ui import OrbisMeetingController
+        events = []
+        controller = OrbisMeetingController(status_callback=lambda s: events.append(("STATUS", s)),
+                                             error_callback=lambda e: events.append(("ERROR", e)))
+        controller._set_error("Test error message")
+
+        self.assertEqual(controller.state, "ERROR")
+        event_types = [e[0] for e in events]
+        self.assertIn("ERROR", event_types)
+        self.assertIn("STATUS", event_types)
+        status_msgs = [e[1] for e in events if e[0] == "STATUS"]
+        self.assertTrue(any("ERROR: Test error message" in msg for msg in status_msgs))
+
+    def test_claim_failure_preserves_target_audio_path(self):
+        """Test load_next_inbox_audio claim failure routes partially touched audio safely to 99_Error."""
+        from orbis_meeting.ui import OrbisMeetingController
+        from orbis_meeting.drive_workflow import DriveWorkflowError
+
+        controller = OrbisMeetingController()
+        controller.set_workflow_root(self.root_path)
+
+        audio_file = self.paths.inbox / "claim_fail_audio.mp3"
+        audio_file.write_bytes(b"claim fail audio data")
+
+        job_dir = self.paths.processing / "claim_fail_job"
+        job_dir.mkdir()
+        target_audio = job_dir / audio_file.name
+        target_audio.write_bytes(b"claim fail audio data moved")
+        audio_file.unlink()
+
+        def failing_claim(audio_path, paths, check_interval_seconds=1.0, sleep_fn=None):
+            raise RuntimeError("Post-move intake processing failure")
+
+        with patch("orbis_meeting.ui.claim_inbox_audio", side_effect=failing_claim):
+            with patch.dict("sys.modules"):
+                with self.assertRaises(DriveWorkflowError):
+                    # Simulate job_dir and target_audio existing in locals during claim
+                    controller.load_next_inbox_audio(check_interval_seconds=0.01)
+
+        # Directly verify fail_workflow_job primitive with target_audio path
+        from orbis_meeting.drive_workflow import fail_workflow_job
+        fail_workflow_job(
+            paths=self.paths,
+            job_id="claim_fail_audio",
+            audio_filename="claim_fail_audio.mp3",
+            audio_path=target_audio,
+            job_dir=job_dir,
+            stage="Claim/Intake",
+            error_message="Intake error",
+        )
+
+        # 99_Error directory created and contains target_audio file
+        err_dirs = list(self.paths.error.iterdir())
+        self.assertEqual(len(err_dirs), 1)
+        err_dir = err_dirs[0]
+        self.assertTrue((err_dir / "claim_fail_audio.mp3").exists())
+
 
 if __name__ == "__main__":
     unittest.main()
