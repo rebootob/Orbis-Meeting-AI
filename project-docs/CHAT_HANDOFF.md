@@ -8,9 +8,9 @@
    3. `project-docs/02_ACTIVE_TASK.md`
    4. `project-docs/04_SCOPE_BOUNDARY.md`
    Read other documents only when directly relevant.
-2. **WP-000 through WP-004 Status:** WP-000, WP-001, WP-002, WP-003, and WP-004 are PASS / CLOSED.
-3. **WP-005A Status:** WP-005A is the only authorized active Work Package.
-4. **Do Not Auto-Start WP-005B:** Do not automatically launch WP-005B or any subsequent Work Package without explicit human Owner approval.
+2. **WP-000 through WP-005A Status:** WP-000, WP-001, WP-002, WP-003, WP-004, and WP-005A are PASS / CLOSED.
+3. **WP-005B Status:** WP-005B is the only authorized active Work Package.
+4. **Do Not Auto-Start WP-005C:** Do not automatically launch WP-005C or any subsequent Work Package without explicit human Owner approval.
 5. **Do Not Expand Scope:** Enforce locked V1 scope boundaries. Reject any premature requests for web apps, mobile apps, Google Drive, Telegram, LINE, databases, or speaker diarization.
 6. **Use Antigravity Only When Necessary and Authorized:** Assign code implementation tasks to Antigravity only when explicitly authorized by the Owner.
 7. **Claude Code Remains STOP by Default:** Keep Claude Code status set to `STOP` unless specifically authorized by the Owner.

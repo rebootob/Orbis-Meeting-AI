@@ -1,10 +1,10 @@
 """
-Local Desktop UI Shell for Orbis Meeting AI (WP-005A)
+Local Desktop UI Shell for Orbis Meeting AI (WP-005A & WP-005B)
 
 Provides a local desktop GUI using Python standard library Tkinter/ttk.
 Supports audio file browsing, WP-001 intake validation, metadata display,
 non-blocking background transcription execution (WP-002), WP-003 text cleanup,
-and read-only transcript rendering while keeping the main UI responsive.
+read-only transcript rendering, and WP-005B Manual AI Handoff (payload copy & JSON import).
 
 Uses thread-safe queue.Queue() handoff for all Tkinter GUI widget updates.
 """
@@ -15,18 +15,25 @@ import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from pathlib import Path
-from typing import Optional, Union, Callable, Dict, Any, Tuple
+from typing import Optional, Union, Callable, Dict, Any
 
 from orbis_meeting.audio_intake import validate_and_intake_audio, AudioJobMetadata, AudioIntakeError
 from orbis_meeting.transcription import WhisperTranscriptionService, TranscriptionResult, TranscriptionError
 from orbis_meeting.text_cleanup import TextCleanupService, TextCleanupError
+from orbis_meeting.summary import MeetingSummaryResult
+from orbis_meeting.manual_handoff import (
+    SUMMARY_TEMPLATES,
+    ManualHandoffError,
+    build_manual_ai_payload,
+    import_manual_ai_result,
+)
 
 
 class OrbisMeetingController:
     """
     Testable application controller managing desktop UI state transitions,
-    audio validation, background worker threading, and cleanup integration.
-    Pushes events to a thread-safe queue.Queue() for main-thread UI consumption.
+    audio validation, background worker threading, cleanup integration,
+    and WP-005B Manual AI Handoff payload creation and JSON importing.
     """
 
     def __init__(
@@ -51,6 +58,9 @@ class OrbisMeetingController:
         self.on_complete_callback = on_complete_callback
 
         self.current_metadata: Optional[AudioJobMetadata] = None
+        self.current_transcript_result: Optional[TranscriptionResult] = None
+        self.current_summary_result: Optional[MeetingSummaryResult] = None
+
         self.state: str = "READY"
         self.is_processing: bool = False
         self.worker_thread: Optional[threading.Thread] = None
@@ -87,17 +97,23 @@ class OrbisMeetingController:
         try:
             metadata = validate_and_intake_audio(file_path)
             self.current_metadata = metadata
+            self.current_transcript_result = None
+            self.current_summary_result = None
             self.state = "AUDIO_SELECTED"
             self._emit_event("METADATA", metadata)
             self._emit_event("STATUS", f"AUDIO_SELECTED: {metadata.filename}")
             return metadata
         except AudioIntakeError as e:
             self.current_metadata = None
+            self.current_transcript_result = None
+            self.current_summary_result = None
             self._emit_event("METADATA", None)
             self._set_error(f"Audio Intake Error: {e}")
             return None
         except Exception as e:
             self.current_metadata = None
+            self.current_transcript_result = None
+            self.current_summary_result = None
             self._emit_event("METADATA", None)
             self._set_error(f"Validation Error: {e}")
             return None
@@ -134,6 +150,7 @@ class OrbisMeetingController:
             raw_result = self.transcription_service.transcribe(metadata)
             cleaned_result = self.cleanup_service.clean_transcript(raw_result)
 
+            self.current_transcript_result = cleaned_result
             self.state = "COMPLETED"
             self.is_processing = False
 
@@ -149,6 +166,31 @@ class OrbisMeetingController:
             self._set_error(f"Unexpected Error: {e}")
             self._emit_event("COMPLETE", None)
 
+    def copy_ai_payload(self, template_name: str = "General Meeting") -> str:
+        """
+        Generate AI-ready payload string for the current cleaned transcript.
+        Raises ManualHandoffError if no cleaned transcript is available.
+        """
+        if not self.current_transcript_result:
+            raise ManualHandoffError("No cleaned transcript available. Please transcribe an audio file first.")
+
+        payload = build_manual_ai_payload(self.current_transcript_result, template_name=template_name)
+        self._emit_event("PAYLOAD_COPIED", payload)
+        return payload
+
+    def import_ai_result(self, raw_json_text: str) -> MeetingSummaryResult:
+        """
+        Parse and validate manually pasted AI JSON result using WP-004 contract.
+        Stores result in current session upon success.
+        """
+        job_id = self.current_transcript_result.job_id if self.current_transcript_result else "manual_job"
+        language = self.current_transcript_result.language if self.current_transcript_result else "th"
+
+        summary_result = import_manual_ai_result(raw_json_text, job_id=job_id, language=language)
+        self.current_summary_result = summary_result
+        self._emit_event("SUMMARY_IMPORTED", summary_result)
+        return summary_result
+
     def _set_error(self, message: str):
         self.state = "ERROR"
         self._emit_event("ERROR", message)
@@ -159,13 +201,14 @@ class OrbisMeetingWindow:
     """
     Tkinter Graphical Desktop Window interface.
     Drains event_queue on the main Tkinter thread for all widget updates.
+    Includes WP-005A audio/transcription UI and WP-005B Manual AI Handoff UI.
     """
 
     def __init__(self, root: tk.Tk, controller: Optional[OrbisMeetingController] = None):
         self.root = root
         self.root.title("Orbis Meeting AI — Local Desktop Shell")
-        self.root.geometry("700x600")
-        self.root.minsize(550, 450)
+        self.root.geometry("750x750")
+        self.root.minsize(600, 550)
 
         self.ui_queue: queue.Queue = queue.Queue()
 
@@ -209,22 +252,27 @@ class OrbisMeetingWindow:
                 self.lbl_extension.config(text="Extension: N/A")
                 self.lbl_size.config(text="File Size: N/A")
                 self.transcribe_button.config(state=tk.DISABLED)
+                self.copy_ai_button.config(state=tk.DISABLED)
         elif event_type == "TRANSCRIPT":
             self.transcript_text.config(state=tk.NORMAL)
             self.transcript_text.delete("1.0", tk.END)
             self.transcript_text.insert(tk.END, payload)
             self.transcript_text.config(state=tk.DISABLED)
+            self.copy_ai_button.config(state=tk.NORMAL)
         elif event_type == "ERROR":
             messagebox.showerror("Orbis Meeting AI Error", payload)
         elif event_type == "COMPLETE":
             self.browse_button.config(state=tk.NORMAL)
             if self.controller.current_metadata:
                 self.transcribe_button.config(state=tk.NORMAL)
+            if self.controller.current_transcript_result:
+                self.copy_ai_button.config(state=tk.NORMAL)
 
     def _build_widgets(self):
         main_frame = ttk.Frame(self.root, padding="15")
         main_frame.pack(fill=tk.BOTH, expand=True)
 
+        # Title Header
         title_label = ttk.Label(
             main_frame,
             text="Orbis Meeting AI",
@@ -232,6 +280,7 @@ class OrbisMeetingWindow:
         )
         title_label.pack(anchor=tk.W, pady=(0, 10))
 
+        # Audio Selection Frame
         selection_frame = ttk.LabelFrame(main_frame, text="Audio Input", padding="10")
         selection_frame.pack(fill=tk.X, pady=(0, 10))
 
@@ -249,6 +298,7 @@ class OrbisMeetingWindow:
         )
         self.selected_file_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
+        # Audio Information Frame
         info_frame = ttk.LabelFrame(main_frame, text="Audio Information", padding="10")
         info_frame.pack(fill=tk.X, pady=(0, 10))
 
@@ -261,6 +311,7 @@ class OrbisMeetingWindow:
         self.lbl_size = ttk.Label(info_frame, text="File Size: N/A")
         self.lbl_size.pack(anchor=tk.W)
 
+        # Actions & Status Frame
         action_frame = ttk.Frame(main_frame)
         action_frame.pack(fill=tk.X, pady=(0, 10))
 
@@ -279,8 +330,9 @@ class OrbisMeetingWindow:
         )
         self.status_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
+        # Transcript Display Area (Read-Only)
         transcript_frame = ttk.LabelFrame(main_frame, text="Cleaned Transcript", padding="10")
-        transcript_frame.pack(fill=tk.BOTH, expand=True)
+        transcript_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
 
         scrollbar = ttk.Scrollbar(transcript_frame)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
@@ -290,11 +342,77 @@ class OrbisMeetingWindow:
             wrap=tk.WORD,
             yscrollcommand=scrollbar.set,
             font=("Consolas", 10),
+            height=6,
         )
         self.transcript_text.pack(fill=tk.BOTH, expand=True)
         scrollbar.config(command=self.transcript_text.yview)
-
         self.transcript_text.config(state=tk.DISABLED)
+
+        # WP-005B Manual AI Handoff Section
+        handoff_frame = ttk.LabelFrame(main_frame, text="Manual AI Handoff (ChatGPT / Gemini / Claude)", padding="10")
+        handoff_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Template Selection & Copy Row
+        template_row = ttk.Frame(handoff_frame)
+        template_row.pack(fill=tk.X, pady=(0, 10))
+
+        ttk.Label(template_row, text="Summary Template:").pack(side=tk.LEFT, padx=(0, 5))
+
+        self.template_var = tk.StringVar(value="General Meeting")
+        self.template_combo = ttk.Combobox(
+            template_row,
+            textvariable=self.template_var,
+            values=list(SUMMARY_TEMPLATES.keys()),
+            state="readonly",
+            width=22,
+        )
+        self.template_combo.pack(side=tk.LEFT, padx=(0, 15))
+
+        self.copy_ai_button = ttk.Button(
+            template_row,
+            text="Copy for AI",
+            command=self._on_copy_ai_clicked,
+            state=tk.DISABLED,
+        )
+        self.copy_ai_button.pack(side=tk.LEFT)
+
+        # Import AI JSON Row
+        import_label = ttk.Label(
+            handoff_frame,
+            text="AI Result — Paste JSON Response Below:",
+            font=("Helvetica", 9, "bold"),
+        )
+        import_label.pack(anchor=tk.W, pady=(5, 5))
+
+        import_scroll = ttk.Scrollbar(handoff_frame)
+        import_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.ai_result_text = tk.Text(
+            handoff_frame,
+            wrap=tk.WORD,
+            yscrollcommand=import_scroll.set,
+            font=("Consolas", 9),
+            height=5,
+        )
+        self.ai_result_text.pack(fill=tk.BOTH, expand=True, pady=(0, 5))
+        import_scroll.config(command=self.ai_result_text.yview)
+
+        btn_row = ttk.Frame(handoff_frame)
+        btn_row.pack(fill=tk.X)
+
+        self.import_button = ttk.Button(
+            btn_row,
+            text="Import AI Result",
+            command=self._on_import_ai_clicked,
+        )
+        self.import_button.pack(side=tk.LEFT, padx=(0, 10))
+
+        self.import_status_label = ttk.Label(
+            btn_row,
+            text="Import Status: No result imported",
+            font=("Helvetica", 9, "italic"),
+        )
+        self.import_status_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
     def _on_browse_clicked(self):
         file_path = filedialog.askopenfilename(
@@ -314,7 +432,43 @@ class OrbisMeetingWindow:
         if self.controller.current_metadata:
             self.transcribe_button.config(state=tk.DISABLED)
             self.browse_button.config(state=tk.DISABLED)
+            self.copy_ai_button.config(state=tk.DISABLED)
             self.controller.start_transcription()
+
+    def _on_copy_ai_clicked(self):
+        try:
+            template = self.template_var.get()
+            payload = self.controller.copy_ai_payload(template_name=template)
+
+            self.root.clipboard_clear()
+            self.root.clipboard_append(payload)
+
+            self.status_label.config(text="Status: Copied. Paste into ChatGPT, Gemini, or Claude.")
+        except Exception as e:
+            messagebox.showerror("Copy Error", str(e))
+
+    def _on_import_ai_clicked(self):
+        raw_text = self.ai_result_text.get("1.0", tk.END).strip()
+        if not raw_text:
+            messagebox.showwarning("Import Error", "Please paste AI JSON response text first.")
+            return
+
+        try:
+            result = self.controller.import_ai_result(raw_text)
+            self.import_status_label.config(
+                text=f"Import Status: Successfully Imported '{result.title}'",
+                font=("Helvetica", 9, "bold"),
+            )
+            messagebox.showinfo(
+                "Import Successful",
+                f"Successfully imported meeting summary:\n\nTitle: {result.title}\nKey Topics: {len(result.key_topics)}\nAction Items: {len(result.action_items)}",
+            )
+        except Exception as e:
+            self.import_status_label.config(
+                text=f"Import Status: Validation Failed ({e})",
+                font=("Helvetica", 9, "italic"),
+            )
+            messagebox.showerror("Import Validation Error", str(e))
 
 
 def launch_app():

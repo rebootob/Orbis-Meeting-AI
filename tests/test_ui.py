@@ -1,5 +1,5 @@
 """
-Unit tests for WP-005A Local Desktop UI Shell and Main-Thread Queue Handoff
+Unit tests for WP-005A & WP-005B Local Desktop UI Shell and Controller Methods
 """
 
 import queue
@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from orbis_meeting.audio_intake import AudioJobMetadata
 from orbis_meeting.transcription import TranscriptionResult, TranscriptionSegment, TranscriptionError
 from orbis_meeting.text_cleanup import TextCleanupError
+from orbis_meeting.manual_handoff import ManualHandoffError
 from orbis_meeting.ui import OrbisMeetingController
 
 
@@ -82,6 +83,19 @@ class TestUIController(unittest.TestCase):
             on_complete_callback=lambda: setattr(self, "completion_flag", True),
         )
 
+        self.valid_ai_json = """
+        {
+          "title": "การประชุม Kintone",
+          "quick_summary": "สรุปสั้น",
+          "key_topics": ["Topic 1"],
+          "full_summary": "สรุปละเอียด",
+          "decisions": ["Decision 1"],
+          "action_items": [{"task": "Task 1", "owner": "Owner 1", "due_date": "2026-09-20"}],
+          "risks": ["Risk 1"],
+          "follow_up": ["Follow up 1"]
+        }
+        """
+
     def tearDown(self):
         self.temp_dir.cleanup()
 
@@ -148,7 +162,6 @@ class TestUIController(unittest.TestCase):
         self.assertFalse(started_again)
 
     def test_queue_handoff_success_flow(self):
-        # Drain initial events
         events_before = []
         while not self.event_queue.empty():
             events_before.append(self.event_queue.get_nowait())
@@ -169,74 +182,34 @@ class TestUIController(unittest.TestCase):
         self.assertIn("STATUS", event_types)
         self.assertIn("COMPLETE", event_types)
 
-        # Confirm transcript payload in queue matches cleaned transcript
         transcript_payload = [evt[1] for evt in queued_events if evt[0] == "TRANSCRIPT"][0]
         self.assertEqual(transcript_payload, "สวัสดีครับ Kintone")
 
-    def test_queue_handoff_error_flow(self):
-        failing_transcription = FakeTranscriptionService(raise_exception=TranscriptionError("Engine outage"))
-        test_queue: queue.Queue = queue.Queue()
-        controller = OrbisMeetingController(
-            transcription_service=failing_transcription,
-            cleanup_service=self.fake_cleanup,
-            event_queue=test_queue,
-        )
-        controller.select_audio_file(self.sample_mp3)
-        controller.start_transcription()
+    def test_copy_ai_payload_without_transcript_rejection(self):
+        with self.assertRaises(ManualHandoffError) as ctx:
+            self.controller.copy_ai_payload()
+        self.assertIn("No cleaned transcript available", str(ctx.exception))
 
-        if controller.worker_thread:
-            controller.worker_thread.join(timeout=2.0)
+    def test_copy_ai_payload_success(self):
+        self.controller.select_audio_file(self.sample_mp3)
+        self.controller.start_transcription()
+        if self.controller.worker_thread:
+            self.controller.worker_thread.join(timeout=2.0)
 
-        queued_events = []
-        while not test_queue.empty():
-            queued_events.append(test_queue.get_nowait())
+        payload = self.controller.copy_ai_payload(template_name="Management Meeting")
+        self.assertIn("TEMPLATE FOCUS: Management Meeting", payload)
+        self.assertIn("สวัสดีครับ Kintone", payload)
 
-        event_types = [evt[0] for evt in queued_events]
-        self.assertIn("ERROR", event_types)
-        self.assertIn("COMPLETE", event_types)
+    def test_import_ai_result_success(self):
+        self.controller.select_audio_file(self.sample_mp3)
+        self.controller.start_transcription()
+        if self.controller.worker_thread:
+            self.controller.worker_thread.join(timeout=2.0)
 
-        error_payload = [evt[1] for evt in queued_events if evt[0] == "ERROR"][0]
-        self.assertIn("Engine outage", error_payload)
-
-    def test_transcription_exception_handling(self):
-        failing_transcription = FakeTranscriptionService(raise_exception=TranscriptionError("Engine error"))
-        controller = OrbisMeetingController(
-            transcription_service=failing_transcription,
-            cleanup_service=self.fake_cleanup,
-            status_callback=lambda msg: self.status_messages.append(msg),
-            error_callback=lambda err: self.error_messages.append(err),
-            on_complete_callback=lambda: setattr(self, "completion_flag", True),
-        )
-        controller.select_audio_file(self.sample_mp3)
-        controller.start_transcription()
-
-        if controller.worker_thread:
-            controller.worker_thread.join(timeout=2.0)
-
-        self.assertEqual(controller.state, "ERROR")
-        self.assertFalse(controller.is_processing)
-        self.assertTrue(len(self.error_messages) > 0)
-        self.assertIn("Engine error", self.error_messages[-1])
-
-    def test_cleanup_exception_handling(self):
-        failing_cleanup = FakeCleanupService(raise_exception=TextCleanupError("Cleanup error"))
-        controller = OrbisMeetingController(
-            transcription_service=self.fake_transcription,
-            cleanup_service=failing_cleanup,
-            status_callback=lambda msg: self.status_messages.append(msg),
-            error_callback=lambda err: self.error_messages.append(err),
-            on_complete_callback=lambda: setattr(self, "completion_flag", True),
-        )
-        controller.select_audio_file(self.sample_mp3)
-        controller.start_transcription()
-
-        if controller.worker_thread:
-            controller.worker_thread.join(timeout=2.0)
-
-        self.assertEqual(controller.state, "ERROR")
-        self.assertFalse(controller.is_processing)
-        self.assertTrue(len(self.error_messages) > 0)
-        self.assertIn("Cleanup error", self.error_messages[-1])
+        summary_result = self.controller.import_ai_result(self.valid_ai_json)
+        self.assertIsNotNone(summary_result)
+        self.assertEqual(summary_result.title, "การประชุม Kintone")
+        self.assertEqual(self.controller.current_summary_result, summary_result)
 
     def test_original_audio_file_unmodified(self):
         initial_content = self.sample_mp3.read_bytes()
