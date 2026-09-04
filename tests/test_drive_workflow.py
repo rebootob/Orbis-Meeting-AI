@@ -156,33 +156,6 @@ class TestDriveWorkflowModule(unittest.TestCase):
 
         self.assertIn("is not located directly inside 01_Inbox", str(ctx.exception))
         self.assertTrue(outside_file.exists())
-
-    def test_completion_audio_move_failure_raises_drive_workflow_error_and_preserves_processing_dir(self):
-        audio = self.paths.inbox / "workflow_meeting.mp3"
-        audio.write_bytes(b"workflow audio content 123")
-
-        job_dir, target_audio, metadata = claim_inbox_audio(audio, self.paths, check_interval_seconds=0.0)
-
-        transcript_result = TranscriptionResult(
-            job_id=metadata.job_id,
-            language="th",
-            full_text="สรุปการประชุม",
-            segments=[],
-        )
-
-        summary_result = MeetingSummaryResult(
-            job_id=metadata.job_id,
-            language="th",
-            title="หัวข้อประชุม",
-            quick_summary="สรุป",
-            key_topics=[],
-            full_summary="รายละเอียด",
-            decisions=[],
-            action_items=[],
-            risks=[],
-            follow_up=[],
-        )
-
     def test_completion_audio_move_failure_raises_drive_workflow_error_and_preserves_processing_dir(self):
         import unittest.mock as mock
         audio = self.paths.inbox / "workflow_meeting.mp3"

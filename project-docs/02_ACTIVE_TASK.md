@@ -1,8 +1,8 @@
 # 02_ACTIVE_TASK.md — Active Work Package
 
 ## Work Package Details
-- **Active Work Package:** WP-007 Google Drive Multi-Device Workflow (Single Processing Host)
-- **Objective:** Implement local sync-folder workflow support for Orbis Meeting AI to enable multi-device audio submission via Google Drive Desktop without requiring Google APIs or OAuth. Orbis manages `01_Inbox`, `02_Processing`, `03_Completed`, and `99_Error` directories under a user-configured workflow root. Enforces single-processing-host operational constraint, file stability check before claiming, deterministic inbox discovery/ordering, safe claim to processing, failure handling to `99_Error` with `error.json`, and completion package export to `03_Completed` reusing WP-006.
+- **Active Work Package:** WP-008 Automatic Job Runner (Single-Host Ingestion & Processing)
+- **Objective:** Implement a single-host automatic job runner (`src/orbis_meeting/job_runner.py`) that periodically scans `01_Inbox`, checks file stability using real WP-007 stability logic, claims the oldest stable audio into `02_Processing`, runs Whisper transcription and text cleanup automatically, stores the cleaned transcript result in session state, and pauses at `WAITING_FOR_SUMMARY`. The runner processes only one active workflow job at a time, routes per-job failures to `99_Error`, survives job failures, and allows existing manual AI handoff / complete workflow job steps to finish the meeting lifecycle before resuming on subsequent scans.
 
 ---
 
@@ -14,50 +14,48 @@
 - `project-docs/**`
 
 ### Forbidden Changes
+- Automatic AI summary generation (OpenAI, Gemini, Claude, local LLMs)
 - Google Drive API, OAuth, service accounts, or Google Cloud SDKs
-- Distributed locking, leases, heartbeat, or multi-worker coordination
-- Automatic background daemon or watcher threads
-- PDF/Word export, Telegram/LINE, email, or database integrations
-- Live AI API calls (OpenAI, Anthropic, Gemini SDKs, HTTP requests)
+- Multi-host coordination, distributed locks, or multi-worker concurrency
+- Telegram, LINE, email, PDF/Word export, databases, or web/mobile UIs
+- External schedulers, OS services, cron, or asyncio rewrites
 
 ---
 
 ## Acceptance Criteria
-- **AC-01:** WP-001 through WP-006 remain working.
-- **AC-02:** Local drive workflow module exists (`src/orbis_meeting/drive_workflow.py`).
-- **AC-03:** No Google API is used.
-- **AC-04:** Workflow root is user-configurable.
-- **AC-05:** Required 4 workflow directories can be initialized.
-- **AC-06:** Inbox discovery accepts only supported audio.
-- **AC-07:** File stability guard exists.
-- **AC-08:** Inbox ordering deterministic.
-- **AC-09:** One stable audio can be claimed into Processing.
-- **AC-10:** Claim preserves audio bytes.
-- **AC-11:** Job folder is collision-safe.
-- **AC-12:** Single Processing Host limitation is documented.
-- **AC-13:** No multi-worker locking exists.
-- **AC-14:** No watcher/daemon required.
-- **AC-15:** Existing manual Browse Audio path remains working.
-- **AC-16:** Workflow-origin job distinguished from manual-origin job.
-- **AC-17:** Workflow completion requires validated summary.
-- **AC-18:** Completion reuses WP-006 exporter.
-- **AC-19:** Completed output is created under 03_Completed.
-- **AC-20:** No existing Completed package is overwritten.
-- **AC-21:** Failure path preserves audio under 99_Error.
-- **AC-22:** error.json contains bounded error metadata.
-- **AC-23:** No failed audio silently deleted.
-- **AC-24:** UI can select/validate workflow root.
-- **AC-25:** UI can explicitly load next Inbox audio.
-- **AC-26:** UI can explicitly complete ready workflow job.
-- **AC-27:** UI never claims actual cloud upload success.
-- **AC-28:** No OAuth/API credentials.
-- **AC-29:** No Google Drive SDK.
-- **AC-30:** No database.
-- **AC-31:** No Telegram/LINE.
-- **AC-32:** No AI API.
-- **AC-33:** No web/mobile app.
-- **AC-34:** No distributed worker design.
-- **AC-35:** No new third-party dependency expected.
-- **AC-36:** Focused tests pass.
-- **AC-37:** Existing tests pass.
-- **AC-38:** No scope beyond WP-007.
+- **AC-01:** WP-001 through WP-007 remain working.
+- **AC-02:** Automatic job runner module exists (`src/orbis_meeting/job_runner.py`).
+- **AC-03:** Single Processing Host model preserved.
+- **AC-04:** Runner can start/stop cleanly.
+- **AC-05:** Runner periodically scans Inbox.
+- **AC-06:** No busy loop (uses `threading.Event` wait).
+- **AC-07:** Real stability guard reused.
+- **AC-08:** Unstable file remains in Inbox.
+- **AC-09:** Oldest deterministic file selected.
+- **AC-10:** Only one active workflow job at a time.
+- **AC-11:** Audio auto-claimed into Processing.
+- **AC-12:** Whisper runs automatically after claim.
+- **AC-13:** Cleanup runs automatically after transcription.
+- **AC-14:** Result stored as cleaned transcript.
+- **AC-15:** Runner stops at WAITING_FOR_SUMMARY.
+- **AC-16:** No summary generated automatically.
+- **AC-17:** Existing manual AI handoff remains usable.
+- **AC-18:** Existing workflow Complete remains usable.
+- **AC-19:** No second job claimed while waiting for summary.
+- **AC-20:** After Complete, runner can resume.
+- **AC-21:** Processing failure routes to Error (`99_Error`).
+- **AC-22:** Failed audio preserved in Error directory.
+- **AC-23:** Runner survives per-job failure.
+- **AC-24:** Manual mode remains usable when runner stopped.
+- **AC-25:** Manual mode cannot corrupt active auto workflow.
+- **AC-26:** Tk thread safety preserved (queue events, no direct widget calls).
+- **AC-27:** No Google API/OAuth.
+- **AC-28:** No AI API.
+- **AC-29:** No local LLM yet.
+- **AC-30:** No Telegram/LINE.
+- **AC-31:** No database.
+- **AC-32:** No multi-worker.
+- **AC-33:** No external scheduler.
+- **AC-34:** No third-party dependency expected.
+- **AC-35:** Focused and full tests pass.
+- **AC-36:** No scope beyond WP-008.

@@ -41,6 +41,7 @@ from orbis_meeting.drive_workflow import (
     complete_workflow_job,
     fail_workflow_job,
 )
+from orbis_meeting.job_runner import AutomaticJobRunner, RunnerState, JobRunnerError
 
 
 def format_summary_text(summary: Optional[MeetingSummaryResult]) -> str:
@@ -158,6 +159,7 @@ class OrbisMeetingController:
         self.state: str = "READY"
         self.is_processing: bool = False
         self.worker_thread: Optional[threading.Thread] = None
+        self.auto_runner: Optional[AutomaticJobRunner] = None
 
         self._emit_event("STATUS", "READY: Please select an audio file.")
 
@@ -176,6 +178,25 @@ class OrbisMeetingController:
         elif event_type == "COMPLETE" and self.on_complete_callback:
             self.on_complete_callback()
 
+    def start_auto_runner(self, scan_interval_seconds: float = 5.0, stability_interval_seconds: float = 1.0) -> bool:
+        """Start the background automatic job runner for 01_Inbox."""
+        if not self.workflow_paths:
+            raise DriveWorkflowError("Cannot start automatic runner: Workflow root directory is not configured.")
+        if self.auto_runner is None:
+            self.auto_runner = AutomaticJobRunner(
+                controller=self,
+                scan_interval_seconds=scan_interval_seconds,
+                stability_interval_seconds=stability_interval_seconds,
+                event_queue=self.event_queue,
+            )
+        return self.auto_runner.start()
+
+    def stop_auto_runner(self) -> bool:
+        """Stop the background automatic job runner cleanly."""
+        if self.auto_runner:
+            return self.auto_runner.stop()
+        return False
+
     def select_audio_file(self, file_path: Optional[Union[str, Path]]) -> Optional[AudioJobMetadata]:
         """
         Handle user selecting an audio file.
@@ -183,6 +204,10 @@ class OrbisMeetingController:
         Sets job_origin = "MANUAL".
         """
         if file_path is None or (isinstance(file_path, str) and not file_path.strip()):
+            return self.current_metadata
+
+        if self.auto_runner and self.auto_runner.is_running:
+            self._set_error("Cannot browse manual audio file while automatic job runner is active.")
             return self.current_metadata
 
         if self.is_processing:
@@ -472,6 +497,14 @@ class OrbisMeetingWindow:
 
         self._build_widgets()
         self._schedule_queue_poll()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _on_close(self):
+        try:
+            self.controller.stop_auto_runner()
+        except Exception:
+            pass
+        self.root.destroy()
 
     def _schedule_queue_poll(self):
         """Schedule periodic queue polling strictly on the main Tkinter thread."""
@@ -496,6 +529,27 @@ class OrbisMeetingWindow:
         elif event_type == "WORKFLOW_INITIALIZED":
             self.workflow_root_label.config(text=f"Workflow Root: {payload.root}", font=("Helvetica", 9, "bold"))
             self.load_inbox_button.config(state=tk.NORMAL)
+            if hasattr(self, "start_runner_button"):
+                is_running = self.controller.auto_runner.is_running if self.controller.auto_runner else False
+                if not is_running:
+                    self.start_runner_button.config(state=tk.NORMAL)
+        elif event_type in ("RUNNER_STATE", "RUNNER_STARTED", "RUNNER_STOPPED"):
+            state_val = payload.get("state", "STOPPED") if isinstance(payload, dict) else "STOPPED"
+            job_val = payload.get("current_job") if isinstance(payload, dict) else None
+            if hasattr(self, "runner_status_label"):
+                self.runner_status_label.config(text=f"Runner Status: {state_val}")
+                self.runner_job_label.config(text=f"Current Job: {job_val or 'N/A'}")
+
+            is_running = self.controller.auto_runner.is_running if self.controller.auto_runner else False
+            if hasattr(self, "start_runner_button"):
+                if is_running:
+                    self.start_runner_button.config(state=tk.DISABLED)
+                    self.stop_runner_button.config(state=tk.NORMAL)
+                    self.browse_button.config(state=tk.DISABLED)
+                else:
+                    self.start_runner_button.config(state=tk.NORMAL if self.controller.workflow_paths else tk.DISABLED)
+                    self.stop_runner_button.config(state=tk.DISABLED)
+                    self.browse_button.config(state=tk.NORMAL)
         elif event_type == "METADATA":
             if payload:
                 self.selected_file_label.config(text=payload.filename, font=("Helvetica", 10, "bold"))
@@ -582,7 +636,37 @@ class OrbisMeetingWindow:
             command=self._on_load_inbox_clicked,
             state=tk.DISABLED,
         )
-        self.load_inbox_button.pack(side=tk.LEFT)
+        self.load_inbox_button.pack(side=tk.LEFT, padx=(0, 10))
+
+        self.start_runner_button = ttk.Button(
+            wf_row2,
+            text="Start Auto Runner",
+            command=self._on_start_runner_clicked,
+            state=tk.DISABLED,
+        )
+        self.start_runner_button.pack(side=tk.LEFT, padx=(0, 10))
+
+        self.stop_runner_button = ttk.Button(
+            wf_row2,
+            text="Stop Auto Runner",
+            command=self._on_stop_runner_clicked,
+            state=tk.DISABLED,
+        )
+        self.stop_runner_button.pack(side=tk.LEFT, padx=(0, 15))
+
+        self.runner_status_label = ttk.Label(
+            wf_row2,
+            text="Runner Status: STOPPED",
+            font=("Helvetica", 9, "bold"),
+        )
+        self.runner_status_label.pack(side=tk.LEFT, padx=(0, 10))
+
+        self.runner_job_label = ttk.Label(
+            wf_row2,
+            text="Current Job: N/A",
+            font=("Helvetica", 9, "italic"),
+        )
+        self.runner_job_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         # Audio Selection Frame
         selection_frame = ttk.LabelFrame(main_frame, text="Audio Input (Manual Browse)", padding="10")
@@ -766,6 +850,20 @@ class OrbisMeetingWindow:
                 )
             except Exception as e:
                 messagebox.showerror("Workflow Error", str(e))
+
+    def _on_start_runner_clicked(self):
+        try:
+            self.controller.start_auto_runner()
+            messagebox.showinfo("Auto Runner", "Automatic Job Runner started.\nMonitoring 01_Inbox periodically.")
+        except Exception as e:
+            messagebox.showerror("Auto Runner Error", str(e))
+
+    def _on_stop_runner_clicked(self):
+        try:
+            self.controller.stop_auto_runner()
+            messagebox.showinfo("Auto Runner", "Automatic Job Runner stopped.")
+        except Exception as e:
+            messagebox.showerror("Auto Runner Error", str(e))
 
     def _on_load_inbox_clicked(self):
         try:

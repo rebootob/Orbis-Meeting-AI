@@ -1,0 +1,306 @@
+"""
+Unit tests for WP-008 Automatic Job Runner Module (src/orbis_meeting/job_runner.py)
+"""
+
+import json
+import sys
+import tempfile
+import time
+import unittest
+from pathlib import Path
+from typing import Optional
+
+# Ensure src/ is in python path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
+from orbis_meeting.audio_intake import AudioJobMetadata
+from orbis_meeting.transcription import TranscriptionResult, TranscriptionSegment, TranscriptionError
+from orbis_meeting.text_cleanup import TextCleanupError
+from orbis_meeting.summary import MeetingSummaryResult
+from orbis_meeting.drive_workflow import initialize_workflow_root, DriveWorkflowPaths, DriveWorkflowError
+from orbis_meeting.ui import OrbisMeetingController
+from orbis_meeting.job_runner import AutomaticJobRunner, RunnerState, JobRunnerError
+
+
+class FakeTranscriptionService:
+    def __init__(self, raw_text="สวัสดีครับ การประชุมระบบอัตโนมัติ", raise_exception=None):
+        self.raw_text = raw_text
+        self.raise_exception = raise_exception
+        self.call_count = 0
+
+    def transcribe(self, metadata: AudioJobMetadata) -> TranscriptionResult:
+        self.call_count += 1
+        if self.raise_exception:
+            raise self.raise_exception
+        return TranscriptionResult(
+            job_id=metadata.job_id,
+            language="th",
+            full_text=self.raw_text,
+            segments=[TranscriptionSegment(start=0.0, end=3.0, text=self.raw_text)],
+        )
+
+
+class FakeCleanupService:
+    def __init__(self, cleaned_text="สวัสดีครับ การประชุมระบบอัตโนมัติ (Cleaned)", raise_exception=None):
+        self.cleaned_text = cleaned_text
+        self.raise_exception = raise_exception
+        self.call_count = 0
+
+    def clean_transcript(self, raw_result: TranscriptionResult) -> TranscriptionResult:
+        self.call_count += 1
+        if self.raise_exception:
+            raise self.raise_exception
+        return TranscriptionResult(
+            job_id=raw_result.job_id,
+            language=raw_result.language,
+            full_text=self.cleaned_text,
+            segments=[TranscriptionSegment(start=0.0, end=3.0, text=self.cleaned_text)],
+        )
+
+
+class TestAutomaticJobRunnerModule(unittest.TestCase):
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root_dir = Path(self.temp_dir.name) / "GoogleDrive_OrbisRoot"
+        self.root_dir.mkdir()
+
+        self.fake_transcription = FakeTranscriptionService()
+        self.fake_cleanup = FakeCleanupService()
+
+        self.controller = OrbisMeetingController(
+            transcription_service=self.fake_transcription,
+            cleanup_service=self.fake_cleanup,
+        )
+        self.paths = self.controller.set_workflow_root(self.root_dir)
+
+        self.runner = AutomaticJobRunner(
+            controller=self.controller,
+            scan_interval_seconds=0.05,
+            stability_interval_seconds=0.0,
+            sleep_fn=lambda s: None,
+        )
+
+    def tearDown(self):
+        if self.runner.is_running:
+            self.runner.stop(timeout=1.0)
+        self.temp_dir.cleanup()
+
+    def test_runner_initial_state_stopped(self):
+        self.assertEqual(self.runner.state, RunnerState.STOPPED)
+        self.assertFalse(self.runner.is_running)
+        self.assertIsNone(self.runner.current_job)
+
+    def test_start_transitions_and_duplicate_start_safe(self):
+        started = self.runner.start()
+        self.assertTrue(started)
+        self.assertTrue(self.runner.is_running)
+
+        # Duplicate start returns False cleanly
+        started_again = self.runner.start()
+        self.assertFalse(started_again)
+        self.assertTrue(self.runner.is_running)
+
+        self.runner.stop(timeout=1.0)
+        self.assertFalse(self.runner.is_running)
+        self.assertEqual(self.runner.state, RunnerState.STOPPED)
+
+    def test_stop_works_and_thread_exits_cleanly(self):
+        self.runner.start()
+        self.assertTrue(self.runner.is_running)
+        stopped = self.runner.stop(timeout=1.0)
+        self.assertTrue(stopped)
+        self.assertFalse(self.runner.is_running)
+        self.assertEqual(self.runner.state, RunnerState.STOPPED)
+
+    def test_run_once_with_no_workflow_root_raises_error(self):
+        empty_controller = OrbisMeetingController()
+        runner = AutomaticJobRunner(controller=empty_controller)
+        with self.assertRaises(JobRunnerError):
+            runner.run_once()
+        self.assertEqual(runner.state, RunnerState.ERROR)
+
+    def test_empty_inbox_transitions_to_idle(self):
+        job = self.runner.run_once()
+        self.assertIsNone(job)
+        self.assertEqual(self.runner.state, RunnerState.IDLE)
+
+    def test_stable_audio_automatically_claimed_transcribed_cleaned_and_pauses_at_waiting_for_summary(self):
+        audio = self.paths.inbox / "meeting_auto.mp3"
+        audio.write_bytes(b"auto binary audio bytes 123")
+
+        claimed_job = self.runner.run_once()
+        self.assertIsNotNone(claimed_job)
+        self.assertEqual(claimed_job, "meeting_auto.mp3")
+
+        # Verified transitions & results
+        self.assertEqual(self.runner.state, RunnerState.WAITING_FOR_SUMMARY)
+        self.assertEqual(self.fake_transcription.call_count, 1)
+        self.assertEqual(self.fake_cleanup.call_count, 1)
+
+        self.assertIsNotNone(self.controller.current_transcript_result)
+        self.assertIn("Cleaned", self.controller.current_transcript_result.full_text)
+
+        # NO automatic summary generated or completed
+        self.assertIsNone(self.controller.current_summary_result)
+        self.assertTrue(self.controller.current_workflow_job_dir.exists())
+        self.assertEqual(self.controller.current_workflow_job_dir.parent, self.paths.processing)
+
+    def test_unstable_audio_remains_in_inbox_and_not_sent_to_error(self):
+        audio = self.paths.inbox / "unstable_auto.mp3"
+        audio.write_bytes(b"initial bytes")
+
+        def mutating_sleep(s):
+            audio.write_bytes(b"initial bytes growing during sync")
+
+        unstable_runner = AutomaticJobRunner(
+            controller=self.controller,
+            scan_interval_seconds=0.05,
+            stability_interval_seconds=0.1,
+            sleep_fn=mutating_sleep,
+        )
+
+        job = unstable_runner.run_once()
+        self.assertIsNone(job)
+
+        # Audio file remains in 01_Inbox
+        self.assertTrue(audio.exists())
+        self.assertEqual(audio.parent, self.paths.inbox)
+
+        # 99_Error remains empty
+        self.assertEqual(len(list(self.paths.error.iterdir())), 0)
+        self.assertEqual(unstable_runner.state, RunnerState.IDLE)
+
+    def test_oldest_stable_audio_selected_and_only_one_job_claimed(self):
+        # Create old and new files
+        f_old = self.paths.inbox / "01_old_meeting.mp3"
+        f_old.write_bytes(b"old meeting audio")
+
+        f_new = self.paths.inbox / "02_new_meeting.mp3"
+        f_new.write_bytes(b"new meeting audio")
+
+        claimed_job = self.runner.run_once()
+        self.assertEqual(claimed_job, "01_old_meeting.mp3")
+        self.assertEqual(self.runner.state, RunnerState.WAITING_FOR_SUMMARY)
+
+        # Second inbox file remains untouched in 01_Inbox while first job is waiting for summary
+        self.assertTrue(f_new.exists())
+        self.assertEqual(f_new.parent, self.paths.inbox)
+
+        # Subsequent run_once does NOT claim second file while first job is waiting for summary
+        second_claim = self.runner.run_once()
+        self.assertIsNone(second_claim)
+        self.assertTrue(f_new.exists())
+
+    def test_copy_for_ai_manual_flow_available_during_waiting_for_summary(self):
+        audio = self.paths.inbox / "handoff_meeting.mp3"
+        audio.write_bytes(b"handoff audio content 123")
+
+        self.runner.run_once()
+        self.assertEqual(self.runner.state, RunnerState.WAITING_FOR_SUMMARY)
+
+        # Copy for AI works
+        payload = self.controller.copy_ai_payload("General Meeting")
+        self.assertIn("Cleaned", payload)
+
+        # Import AI result works
+        ai_json = json.dumps({
+            "title": "การประชุมอัตโนมัติ",
+            "quick_summary": "สรุปงานสั้น",
+            "key_topics": ["หัวข้อ 1"],
+            "full_summary": "สรุปยาว",
+            "decisions": [],
+            "action_items": [],
+            "risks": [],
+            "follow_up": []
+        })
+        imported_summary = self.controller.import_ai_result(ai_json)
+        self.assertIsNotNone(imported_summary)
+
+        # Complete Workflow Job works and clears workflow tracking state
+        res = self.controller.complete_workflow_job()
+        self.assertTrue(res.package_dir.exists())
+
+        # Runner can now process second job on subsequent run_once
+        f_next = self.paths.inbox / "next_meeting.mp3"
+        f_next.write_bytes(b"next meeting bytes")
+
+        next_claimed = self.runner.run_once()
+        self.assertEqual(next_claimed, "next_meeting.mp3")
+
+    def test_transcription_failure_routes_to_error_and_runner_survives(self):
+        failing_transcribe = FakeTranscriptionService(raise_exception=TranscriptionError("Whisper engine error"))
+        self.controller.transcription_service = failing_transcribe
+
+        audio = self.paths.inbox / "transcription_fail.mp3"
+        raw_bytes = b"failing audio binary bytes 123"
+        audio.write_bytes(raw_bytes)
+
+        claimed = self.runner.run_once()
+        self.assertIsNone(claimed)
+
+        # Error directory contains failed audio & error.json
+        err_dirs = list(self.paths.error.iterdir())
+        self.assertEqual(len(err_dirs), 1)
+        err_dir = err_dirs[0]
+
+        moved_audio = err_dir / "transcription_fail.mp3"
+        self.assertTrue(moved_audio.exists())
+        self.assertEqual(moved_audio.read_bytes(), raw_bytes)
+
+        err_json = err_dir / "error.json"
+        self.assertTrue(err_json.exists())
+        err_data = json.loads(err_json.read_text(encoding="utf-8"))
+        self.assertIn("Whisper engine error", err_data["error"])
+
+        # Runner state returns to IDLE and can process next job
+        self.assertEqual(self.runner.state, RunnerState.IDLE)
+
+        # Next job processable
+        audio2 = self.paths.inbox / "subsequent_job.mp3"
+        audio2.write_bytes(b"subsequent audio bytes 456")
+        self.controller.transcription_service = FakeTranscriptionService()
+
+        job2 = self.runner.run_once()
+        self.assertEqual(job2, "subsequent_job.mp3")
+        self.assertEqual(self.runner.state, RunnerState.WAITING_FOR_SUMMARY)
+
+    def test_cleanup_failure_routes_to_error_and_runner_survives(self):
+        failing_cleanup = FakeCleanupService(raise_exception=TextCleanupError("Company dictionary mapping invalid"))
+        self.controller.cleanup_service = failing_cleanup
+
+        audio = self.paths.inbox / "cleanup_fail.mp3"
+        audio.write_bytes(b"cleanup fail bytes 123")
+
+        claimed = self.runner.run_once()
+        self.assertIsNone(claimed)
+
+        # File routed to 99_Error
+        err_dirs = list(self.paths.error.iterdir())
+        self.assertEqual(len(err_dirs), 1)
+        self.assertEqual(self.runner.state, RunnerState.IDLE)
+
+    def test_manual_browse_rejected_when_runner_active_and_works_when_stopped(self):
+        manual_audio = Path(self.temp_dir.name) / "manual_test.mp3"
+        manual_audio.write_bytes(b"manual test bytes")
+
+        self.runner.start()
+        self.assertTrue(self.runner.is_running)
+
+        # Manual browse rejected while runner is active
+        res = self.controller.select_audio_file(manual_audio)
+        self.assertIsNone(res)
+        self.assertEqual(self.controller.state, "ERROR")
+
+        # Stop runner -> manual browse works
+        self.runner.stop(timeout=1.0)
+        self.assertFalse(self.runner.is_running)
+
+        meta = self.controller.select_audio_file(manual_audio)
+        self.assertIsNotNone(meta)
+        self.assertEqual(meta.filename, "manual_test.mp3")
+        self.assertEqual(self.controller.job_origin, "MANUAL")
+
+
+if __name__ == "__main__":
+    unittest.main()
