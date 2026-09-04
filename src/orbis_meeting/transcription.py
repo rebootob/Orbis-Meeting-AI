@@ -59,6 +59,26 @@ class TranscriptionResult:
         }
 
 
+class ConfigErrorTranscriptionService:
+    """
+    Fallback transcription service instantiated when Whisper runtime configuration is invalid.
+    Prevents application startup crash while raising a bounded TranscriptionError on transcribe().
+    """
+
+    def __init__(self, config_error: str):
+        self.config_error = config_error
+        self.model_name = "ERROR"
+        self.device = "ERROR"
+        self.compute_type = "ERROR"
+
+    def transcribe(
+        self,
+        audio_input: Union[AudioJobMetadata, str, Path],
+        language: Optional[str] = None,
+    ) -> TranscriptionResult:
+        raise TranscriptionError(f"Whisper configuration error: {self.config_error}")
+
+
 class WhisperTranscriptionService:
     """
     Local transcription service wrapper around faster-whisper.
@@ -230,38 +250,39 @@ def build_transcription_service_from_environment(
 
 
 def format_whisper_runtime_status(
-    config_or_service: Optional[Union[WhisperRuntimeConfig, WhisperTranscriptionService]] = None,
+    config_or_service: Optional[Union[WhisperRuntimeConfig, WhisperTranscriptionService, Any]] = None,
 ) -> str:
     """
     Format a bounded status string representation of the Whisper runtime configuration.
     Example: 'large-v3 | CPU | default' or 'medium | CUDA | int8_float16'
+    Returns 'Configuration Error — {error}' if configuration is invalid.
     """
     if config_or_service is None:
         try:
             config = load_whisper_runtime_config_from_environment()
-            model_name = config.model_name
-            device = config.device.upper()
-            compute_type = config.compute_type
-        except Exception:
-            model_name = "large-v3"
-            device = "CPU"
-            compute_type = "default"
-    elif isinstance(config_or_service, WhisperRuntimeConfig):
-        model_name = config_or_service.model_name
-        device = config_or_service.device.upper()
-        compute_type = config_or_service.compute_type
-    elif isinstance(config_or_service, WhisperTranscriptionService):
-        model_name = config_or_service.model_name
-        device = str(config_or_service.device).upper()
-        compute_type = config_or_service.compute_type
-    else:
-        raw_model = getattr(config_or_service, "model_name", "large-v3")
-        raw_device = getattr(config_or_service, "device", "cpu")
-        raw_compute = getattr(config_or_service, "compute_type", "default")
+            return f"{config.model_name} | {config.device.upper()} | {config.compute_type}"
+        except WhisperRuntimeConfigError as e:
+            return f"Configuration Error — {e}"
+        except Exception as e:
+            return f"Configuration Error — {e}"
 
-        model_name = raw_model if isinstance(raw_model, str) and raw_model else "large-v3"
-        device = (raw_device if isinstance(raw_device, str) and raw_device else "cpu").upper()
-        compute_type = raw_compute if isinstance(raw_compute, str) and raw_compute else "default"
+    if isinstance(config_or_service, ConfigErrorTranscriptionService) or isinstance(getattr(config_or_service, "config_error", None), str):
+        config_error = getattr(config_or_service, "config_error", "Invalid configuration")
+        return f"Configuration Error — {config_error}"
+
+    if isinstance(config_or_service, WhisperRuntimeConfig):
+        return f"{config_or_service.model_name} | {config_or_service.device.upper()} | {config_or_service.compute_type}"
+
+    if isinstance(config_or_service, WhisperTranscriptionService):
+        return f"{config_or_service.model_name} | {str(config_or_service.device).upper()} | {config_or_service.compute_type}"
+
+    raw_model = getattr(config_or_service, "model_name", "large-v3")
+    raw_device = getattr(config_or_service, "device", "cpu")
+    raw_compute = getattr(config_or_service, "compute_type", "default")
+
+    model_name = raw_model if isinstance(raw_model, str) and raw_model else "large-v3"
+    device = (raw_device if isinstance(raw_device, str) and raw_device else "cpu").upper()
+    compute_type = raw_compute if isinstance(raw_compute, str) and raw_compute else "default"
 
     return f"{model_name} | {device} | {compute_type}"
 

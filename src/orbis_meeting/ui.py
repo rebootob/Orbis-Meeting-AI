@@ -23,6 +23,8 @@ from orbis_meeting.transcription import (
     WhisperTranscriptionService,
     TranscriptionResult,
     TranscriptionError,
+    WhisperRuntimeConfigError,
+    ConfigErrorTranscriptionService,
     build_transcription_service_from_environment,
     format_whisper_runtime_status,
 )
@@ -158,8 +160,14 @@ class OrbisMeetingController:
     ):
         if transcription_service is not None:
             self.transcription_service = transcription_service
+            self.whisper_runtime_status = format_whisper_runtime_status(self.transcription_service)
         else:
-            self.transcription_service = build_transcription_service_from_environment()
+            try:
+                self.transcription_service = build_transcription_service_from_environment()
+                self.whisper_runtime_status = format_whisper_runtime_status(self.transcription_service)
+            except WhisperRuntimeConfigError as e:
+                self.transcription_service = ConfigErrorTranscriptionService(str(e))
+                self.whisper_runtime_status = f"Configuration Error — {e}"
         self.cleanup_service = cleanup_service or TextCleanupService()
         if auto_summary_service is not None:
             self.auto_summary_service = auto_summary_service
@@ -864,7 +872,7 @@ class OrbisMeetingWindow:
         engine_row = ttk.Frame(handoff_frame)
         engine_row.pack(fill=tk.X, pady=(0, 5))
 
-        whisper_text = f"{get_text(self.current_lang, 'whisper_engine_status')} {format_whisper_runtime_status(self.controller.transcription_service)}"
+        whisper_text = f"{get_text(self.current_lang, 'whisper_engine_status')} {self.controller.whisper_runtime_status}"
         self.whisper_engine_status_label = ttk.Label(
             engine_row,
             text=whisper_text,
@@ -1171,7 +1179,7 @@ class OrbisMeetingWindow:
         if hasattr(self, "stop_runner_button"):
             self.stop_runner_button.config(text=get_text(lang, "stop_runner_btn"))
         if hasattr(self, "whisper_engine_status_label"):
-            whisper_text = f"{get_text(lang, 'whisper_engine_status')} {format_whisper_runtime_status(self.controller.transcription_service)}"
+            whisper_text = f"{get_text(lang, 'whisper_engine_status')} {self.controller.whisper_runtime_status}"
             self.whisper_engine_status_label.config(text=whisper_text)
 
         # Update Control Center Tab Frames & Headings

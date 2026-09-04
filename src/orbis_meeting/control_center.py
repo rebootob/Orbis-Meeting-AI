@@ -293,7 +293,9 @@ def get_control_center_snapshot(
 
     # Extract Whisper Engine Status
     from orbis_meeting.transcription import format_whisper_runtime_status
-    if controller is not None and getattr(controller, "transcription_service", None) is not None:
+    if controller is not None and isinstance(getattr(controller, "whisper_runtime_status", None), str):
+        whisper_engine_status = controller.whisper_runtime_status
+    elif controller is not None and getattr(controller, "transcription_service", None) is not None:
         whisper_engine_status = format_whisper_runtime_status(controller.transcription_service)
     else:
         whisper_engine_status = format_whisper_runtime_status()

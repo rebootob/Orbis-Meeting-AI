@@ -207,6 +207,14 @@ class TestControlCenter(unittest.TestCase):
         snapshot = get_control_center_snapshot(controller=mock_controller)
         self.assertEqual(snapshot.whisper_engine_status, "medium | CUDA | float16")
 
+    def test_control_center_snapshot_reports_configuration_error_on_invalid_env(self):
+        """Test that Control Center snapshot reports Configuration Error when env is invalid."""
+        with patch.dict(os.environ, {"ORBIS_WHISPER_DEVICE": "tpu"}):
+            snapshot = get_control_center_snapshot(controller=None)
+            self.assertTrue(snapshot.whisper_engine_status.startswith("Configuration Error — "))
+            self.assertIn("tpu", snapshot.whisper_engine_status)
+            self.assertNotEqual(snapshot.whisper_engine_status, "large-v3 | CPU | default")
+
     def test_wp010_completion_safety_preserved_on_completion_failure(self):
         """Test that completion failure in controller does not route to 99_Error or clear state."""
         from orbis_meeting.ui import OrbisMeetingController

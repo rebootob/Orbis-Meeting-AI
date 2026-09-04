@@ -19,6 +19,7 @@ from orbis_meeting.transcription import (
     TranscriptionResult,
     TranscriptionSegment,
     WhisperTranscriptionService,
+    ConfigErrorTranscriptionService,
     WhisperRuntimeConfig,
     WhisperRuntimeConfigError,
     load_whisper_runtime_config_from_environment,
@@ -281,6 +282,27 @@ class TestWhisperRuntimeConfig(unittest.TestCase):
         service = build_transcription_service_from_environment(model_backend=None)
         # Internal model backend must remain None until transcribe() is executed
         self.assertIsNone(service._model)
+
+    def test_config_error_transcription_service_raises_transcription_error(self):
+        """Test that ConfigErrorTranscriptionService raises bounded TranscriptionError on transcribe()."""
+        service = ConfigErrorTranscriptionService("Invalid ORBIS_WHISPER_DEVICE 'tpu'")
+        self.assertEqual(format_whisper_runtime_status(service), "Configuration Error — Invalid ORBIS_WHISPER_DEVICE 'tpu'")
+
+        with patch.dict("sys.modules"):
+            # Ensure faster_whisper is not imported/loaded during transcription attempt
+            sys.modules.pop("faster_whisper", None)
+            with self.assertRaises(TranscriptionError) as ctx:
+                service.transcribe("dummy_path.wav")
+            self.assertIn("Whisper configuration error: Invalid ORBIS_WHISPER_DEVICE 'tpu'", str(ctx.exception))
+            self.assertNotIn("faster_whisper", sys.modules)
+
+    def test_format_whisper_runtime_status_with_invalid_environment(self):
+        """Test that format_whisper_runtime_status reports Configuration Error instead of fallback default when env is invalid."""
+        with patch.dict(os.environ, {"ORBIS_WHISPER_DEVICE": "tpu"}):
+            status = format_whisper_runtime_status()
+            self.assertTrue(status.startswith("Configuration Error — "))
+            self.assertIn("tpu", status)
+            self.assertNotEqual(status, "large-v3 | CPU | default")
 
 
 if __name__ == "__main__":

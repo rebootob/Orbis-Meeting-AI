@@ -19,6 +19,8 @@ from orbis_meeting.transcription import (
     TranscriptionResult,
     TranscriptionSegment,
     TranscriptionError,
+    WhisperTranscriptionService,
+    ConfigErrorTranscriptionService,
     format_whisper_runtime_status,
 )
 from orbis_meeting.text_cleanup import TextCleanupError
@@ -396,6 +398,59 @@ class TestWhisperUIIntegration(unittest.TestCase):
         custom_service = FakeTranscriptionService()
         controller = OrbisMeetingController(transcription_service=custom_service)
         self.assertEqual(controller.transcription_service, custom_service)
+
+    def test_invalid_model_does_not_crash_controller_construction(self):
+        """Test that invalid ORBIS_WHISPER_MODEL does not crash controller construction."""
+        with patch.dict(os.environ, {"ORBIS_WHISPER_MODEL": "   "}):
+            controller = OrbisMeetingController(transcription_service=None)
+            self.assertIsInstance(controller.transcription_service, ConfigErrorTranscriptionService)
+            self.assertFalse(isinstance(controller.transcription_service, WhisperTranscriptionService))
+            self.assertTrue(controller.whisper_runtime_status.startswith("Configuration Error — "))
+            self.assertIn("ORBIS_WHISPER_MODEL", controller.whisper_runtime_status)
+
+    def test_invalid_device_does_not_crash_controller_construction(self):
+        """Test that invalid ORBIS_WHISPER_DEVICE does not crash controller construction."""
+        with patch.dict(os.environ, {"ORBIS_WHISPER_DEVICE": "tpu"}):
+            controller = OrbisMeetingController(transcription_service=None)
+            self.assertIsInstance(controller.transcription_service, ConfigErrorTranscriptionService)
+            self.assertFalse(isinstance(controller.transcription_service, WhisperTranscriptionService))
+            self.assertTrue(controller.whisper_runtime_status.startswith("Configuration Error — "))
+            self.assertIn("tpu", controller.whisper_runtime_status)
+
+    def test_invalid_compute_type_does_not_crash_controller_construction(self):
+        """Test that empty ORBIS_WHISPER_COMPUTE_TYPE does not crash controller construction."""
+        with patch.dict(os.environ, {"ORBIS_WHISPER_COMPUTE_TYPE": ""}):
+            controller = OrbisMeetingController(transcription_service=None)
+            self.assertIsInstance(controller.transcription_service, ConfigErrorTranscriptionService)
+            self.assertFalse(isinstance(controller.transcription_service, WhisperTranscriptionService))
+            self.assertTrue(controller.whisper_runtime_status.startswith("Configuration Error — "))
+            self.assertIn("ORBIS_WHISPER_COMPUTE_TYPE", controller.whisper_runtime_status)
+
+    def test_invalid_config_transcription_attempt_emits_error_and_status(self):
+        """Test that attempting transcription on invalid config raises error and updates controller state cleanly."""
+        temp_dir = tempfile.TemporaryDirectory()
+        try:
+            audio_path = Path(temp_dir.name) / "sample.mp3"
+            audio_path.write_bytes(b"dummy mp3 content 12345")
+
+            events = []
+            with patch.dict(os.environ, {"ORBIS_WHISPER_DEVICE": "tpu"}):
+                controller = OrbisMeetingController(
+                    status_callback=lambda s: events.append(("STATUS", s)),
+                    error_callback=lambda e: events.append(("ERROR", e)),
+                )
+                controller.select_audio_file(audio_path)
+                controller.start_transcription()
+
+                if controller.worker_thread:
+                    controller.worker_thread.join(timeout=2.0)
+
+                self.assertEqual(controller.state, "ERROR")
+                error_events = [e[1] for e in events if e[0] == "ERROR"]
+                self.assertTrue(len(error_events) > 0)
+                self.assertIn("Whisper configuration error", error_events[0])
+        finally:
+            temp_dir.cleanup()
 
 
 if __name__ == "__main__":
