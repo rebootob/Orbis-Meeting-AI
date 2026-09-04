@@ -57,6 +57,9 @@ def build_manual_ai_payload(
     :param language: Language code ("th", "en", etc.).
     :return: Formatted text payload string.
     """
+    if template_name not in SUMMARY_TEMPLATES:
+        raise ManualHandoffError(f"Unsupported summary template: {template_name}")
+
     if isinstance(transcript_input, TranscriptionResult):
         transcript_text = transcript_input.full_text
         lang = transcript_input.language
@@ -69,7 +72,7 @@ def build_manual_ai_payload(
     if not transcript_text or not transcript_text.strip():
         raise ManualHandoffError("Cannot generate AI payload for empty transcript text.")
 
-    template_focus = SUMMARY_TEMPLATES.get(template_name, SUMMARY_TEMPLATES["General Meeting"])
+    template_focus = SUMMARY_TEMPLATES[template_name]
     base_instructions = build_summary_prompt(lang)
 
     return (
@@ -89,30 +92,33 @@ def build_manual_ai_payload(
 
 def extract_json_payload(raw_text: str) -> str:
     """
-    Extract raw JSON string from potentially markdown-wrapped text.
+    Extract raw JSON string strictly from input text.
 
-    Supports raw JSON, ```json ... ```, or ``` ... ``` code blocks.
+    Supported inputs ONLY:
+    1. Raw JSON object text starting with '{' and ending with '}'.
+    2. A single markdown fenced code block (```json ... ``` or ``` ... ```) wrapping a JSON object.
+    Arbitrary prose around JSON is strictly rejected.
     """
-    if not raw_text or not raw_text.strip():
+    if not raw_text or not isinstance(raw_text, str) or not raw_text.strip():
         raise ManualHandoffError("Pasted AI result is empty. Please paste valid JSON.")
 
     cleaned = raw_text.strip()
 
-    # Match ```json ... ``` or ``` ... ``` markdown blocks
-    match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", cleaned, re.IGNORECASE)
-    if match:
-        cleaned = match.group(1).strip()
-    else:
-        # Fall back to finding first '{' and last '}'
-        start = cleaned.find("{")
-        end = cleaned.rfind("}")
-        if start != -1 and end != -1 and start < end:
-            cleaned = cleaned[start:end + 1].strip()
+    if cleaned.startswith("```"):
+        match = re.match(r"^```(?:json)?\s*([\s\S]*?)\s*```$", cleaned, re.IGNORECASE)
+        if match:
+            extracted = match.group(1).strip()
+            if extracted.startswith("{") and extracted.endswith("}"):
+                return extracted
+            raise ManualHandoffError("Content inside fenced code block is not a valid JSON object.")
+        raise ManualHandoffError("Malformed fenced code block. Expected ```json ... ```.")
 
-    if not cleaned:
-        raise ManualHandoffError("Could not locate valid JSON structure in pasted text.")
+    if cleaned.startswith("{") and cleaned.endswith("}"):
+        return cleaned
 
-    return cleaned
+    raise ManualHandoffError(
+        "Invalid AI result format. Input must be raw JSON object text or a single markdown fenced JSON block."
+    )
 
 
 def import_manual_ai_result(
