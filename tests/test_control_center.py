@@ -194,6 +194,49 @@ class TestControlCenter(unittest.TestCase):
         self.assertTrue(snapshot.summary_engine_enabled)
         self.assertEqual(snapshot.summary_engine_provider, "Summary Engine: Local Automatic Ready")
 
+    def test_wp010_completion_safety_preserved_on_completion_failure(self):
+        """Test that completion failure in controller does not route to 99_Error or clear state."""
+        from orbis_meeting.ui import OrbisMeetingController
+        from orbis_meeting.transcription import TranscriptionResult
+        from orbis_meeting.summary import MeetingSummaryResult
+        from orbis_meeting.drive_workflow import DriveWorkflowError
+
+        controller = OrbisMeetingController()
+        controller.set_workflow_root(self.root_path)
+
+        audio_path = self.paths.inbox / "safety_test.mp3"
+        audio_path.write_bytes(b"audio data 123")
+
+        metadata = controller.load_next_inbox_audio(check_interval_seconds=0.01)
+        controller.current_transcript_result = TranscriptionResult(
+            job_id=metadata.job_id,
+            language="th",
+            full_text="Test transcript",
+            segments=[],
+        )
+        controller.current_summary_result = MeetingSummaryResult(
+            job_id=metadata.job_id,
+            language="th",
+            title="Safety Test Meeting",
+            quick_summary="Quick summary",
+            key_topics=["Topic 1"],
+            full_summary="Full summary content",
+            decisions=[],
+            action_items=[],
+            risks=[],
+            follow_up=[],
+        )
+
+        with patch("orbis_meeting.ui.complete_workflow_job", side_effect=DriveWorkflowError("Disk error during export")):
+            with self.assertRaises(DriveWorkflowError):
+                controller.complete_workflow_job()
+
+        # Invariants: No routing to 99_Error, session state & data preserved
+        self.assertEqual(len(list(self.paths.error.iterdir())), 0)
+        self.assertIsNotNone(controller.current_workflow_job_dir)
+        self.assertIsNotNone(controller.current_summary_result)
+        self.assertIsNotNone(controller.current_transcript_result)
+
 
 if __name__ == "__main__":
     unittest.main()

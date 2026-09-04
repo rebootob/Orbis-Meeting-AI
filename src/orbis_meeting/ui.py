@@ -338,106 +338,115 @@ class OrbisMeetingController:
         template_name: str = "General Meeting",
         clear_state: bool = True,
     ) -> ExportPackageResult:
-        """Complete a workflow job by exporting package to 03_Completed."""
-        if self.job_origin != "WORKFLOW":
+        """
+        Complete current WORKFLOW job, exporting package to 03_Completed.
+        If clear_state is True, validates completion invariants and clears workflow state.
+        If clear_state is False, returns export result without clearing workflow state yet.
+        Raises DriveWorkflowError if job_origin is MANUAL, data missing, or validation fails.
+        """
+        if self.job_origin != "WORKFLOW" or not self.workflow_paths:
             raise DriveWorkflowError("Current job is not a Google Drive workflow job.")
 
-        if not self.workflow_paths:
-            raise DriveWorkflowError("Workflow root is not initialized.")
-
         if not self.current_metadata or not self.current_transcript_result or not self.current_summary_result:
-            raise DriveWorkflowError("Cannot complete workflow job: metadata, transcript, and summary must all be completed first.")
+            raise DriveWorkflowError("Cannot complete workflow job: metadata, transcript, and summary required.")
 
-        try:
-            export_res = complete_workflow_job(
-                job_dir=self.current_workflow_job_dir,
-                target_audio_path=self.current_workflow_audio_path,
-                metadata=self.current_metadata,
-                transcript_result=self.current_transcript_result,
-                summary_result=self.current_summary_result,
-                paths=self.workflow_paths,
-                template_name=template_name,
-            )
+        audio_filename = self.current_metadata.filename if self.current_metadata else None
 
-            if clear_state:
-                self.clear_completed_workflow_state()
+        result = complete_workflow_job(
+            job_dir=self.current_workflow_job_dir,
+            target_audio_path=self.current_workflow_audio_path,
+            metadata=self.current_metadata,
+            transcript_result=self.current_transcript_result,
+            summary_result=self.current_summary_result,
+            paths=self.workflow_paths,
+            template_name=template_name,
+        )
 
-            self._emit_event("WORKFLOW_COMPLETED", export_res)
-            return export_res
+        from orbis_meeting.job_runner import validate_completion_result
 
-        except Exception as e:
-            if self.workflow_paths and self.current_metadata:
-                fail_workflow_job(
-                    paths=self.workflow_paths,
-                    job_id=self.current_metadata.job_id,
-                    audio_filename=self.current_metadata.filename,
-                    audio_path=self.current_workflow_audio_path,
-                    job_dir=self.current_workflow_job_dir,
-                    stage="Workflow Completion",
-                    error_message=str(e),
-                )
-            if clear_state:
-                self.clear_completed_workflow_state()
-            self._set_error(f"Workflow Completion Failure: {e}")
-            raise DriveWorkflowError(f"Failed to complete workflow job: {e}") from e
+        if not validate_completion_result(result, self.workflow_paths, audio_filename):
+            raise DriveWorkflowError("Exported meeting package failed post-completion invariant validation.")
+
+        if clear_state:
+            self.clear_completed_workflow_state()
+            self._emit_event("WORKFLOW_COMPLETED", result)
+            self._emit_event("STATUS", "WORKFLOW: Saved to local Google Drive sync folder (03_Completed).")
+
+        return result
 
     def clear_completed_workflow_state(self):
-        """Clear controller active job state upon workflow completion."""
-        self.job_origin = "MANUAL"
+        """Clear active workflow job tracking state after validated completion."""
         self.current_workflow_job_dir = None
         self.current_workflow_audio_path = None
-        self.current_metadata = None
-        self.current_transcript_result = None
-        self.current_summary_result = None
-        self.state = "READY"
-        self._emit_event("METADATA", None)
-        self._emit_event("SUMMARY_IMPORTED", None)
-        self._emit_event("STATUS", "WORKFLOW COMPLETED: Package saved to 03_Completed. System READY.")
+        self.job_origin = "MANUAL"
+
+        if self.auto_runner and self.auto_runner.state in (
+            RunnerState.SUMMARY_READY,
+            RunnerState.COMPLETING,
+            RunnerState.COMPLETION_ERROR,
+            RunnerState.WAITING_FOR_SUMMARY,
+            RunnerState.SUMMARY_ERROR,
+        ):
+            new_state = RunnerState.STOPPING if self.auto_runner.is_stopping else RunnerState.IDLE
+            self.auto_runner.state = new_state
+            self.auto_runner.current_job = None
+            if self.event_queue:
+                self.event_queue.put(("RUNNER_STATE", {
+                    "state": new_state.value,
+                    "current_job": None,
+                    "is_running": self.auto_runner.is_running,
+                }))
 
     def start_transcription(self) -> bool:
-        """Start non-blocking transcription and Thai text cleanup on a background worker thread."""
-        if not self.current_metadata:
-            self._set_error("Cannot start transcription: No audio file selected.")
+        """
+        Initiate non-blocking background transcription if a valid audio file is selected.
+        """
+        if self.is_processing:
             return False
 
-        if self.is_processing:
-            self._set_error("Transcription is already in progress.")
+        if self.auto_runner and self.auto_runner.is_running and self.job_origin == "WORKFLOW":
+            self._set_error("Cannot start manual transcription while automatic job runner is active on workflow job.")
+            return False
+
+        if not self.current_metadata:
+            self._set_error("No valid audio file selected. Please select a .mp3, .wav, or .m4a file.")
             return False
 
         self.is_processing = True
-        self.state = "TRANSCRIBING"
-        self._emit_event("STATUS", f"TRANSCRIBING: Transcribing audio file '{self.current_metadata.filename}'...")
+        self.state = "PROCESSING"
+        self._emit_event("STATUS", "PROCESSING: Transcribing audio locally...")
 
         self.worker_thread = threading.Thread(
-            target=self._transcription_worker_task,
-            args=(self.current_metadata.original_path,),
+            target=self._run_transcription_worker,
+            args=(self.current_metadata,),
             daemon=True,
         )
         self.worker_thread.start()
         return True
 
-    def _transcription_worker_task(self, audio_path: str):
-        """Worker task executing transcription & cleanup on background thread."""
+    def _run_transcription_worker(self, metadata: AudioJobMetadata):
+        """
+        Worker thread executing WP-002 transcription and WP-003 cleanup.
+        Places results/events into queue.Queue() without touching Tkinter widgets.
+        """
         try:
-            raw_result = self.transcription_service.transcribe(self.current_metadata)
-            self._emit_event("STATUS", "CLEANING: Applying Thai text post-processing cleanup...")
-
+            raw_result = self.transcription_service.transcribe(metadata)
             cleaned_result = self.cleanup_service.clean_transcript(raw_result)
 
             self.current_transcript_result = cleaned_result
             self.state = "COMPLETED"
             self.is_processing = False
-            self._emit_event("TRANSCRIPT", cleaned_result.full_text)
-            self._emit_event("STATUS", "TRANSCRIPT_READY: Transcription & cleanup complete.")
-            self._emit_event("COMPLETE", None)
 
+            self._emit_event("TRANSCRIPT", cleaned_result.full_text)
+            self._emit_event("STATUS", "COMPLETED: Cleaned transcript ready.")
+            self._emit_event("COMPLETE", None)
         except (TranscriptionError, TextCleanupError) as e:
             self.is_processing = False
             if self.job_origin == "WORKFLOW" and self.workflow_paths:
                 fail_workflow_job(
                     paths=self.workflow_paths,
-                    job_id=self.current_metadata.job_id if self.current_metadata else "unknown",
-                    audio_filename=self.current_metadata.filename if self.current_metadata else "unknown",
+                    job_id=metadata.job_id,
+                    audio_filename=metadata.filename,
                     audio_path=self.current_workflow_audio_path,
                     job_dir=self.current_workflow_job_dir,
                     stage="Transcription/Cleanup",
@@ -446,60 +455,62 @@ class OrbisMeetingController:
                 self.current_workflow_job_dir = None
                 self.current_workflow_audio_path = None
                 self.job_origin = "MANUAL"
-            self._set_error(f"Processing Failure: {e}")
+            self._set_error(f"Processing Error: {e}")
+            self._emit_event("COMPLETE", None)
         except Exception as e:
             self.is_processing = False
             if self.job_origin == "WORKFLOW" and self.workflow_paths:
                 fail_workflow_job(
                     paths=self.workflow_paths,
-                    job_id=self.current_metadata.job_id if self.current_metadata else "unknown",
-                    audio_filename=self.current_metadata.filename if self.current_metadata else "unknown",
+                    job_id=metadata.job_id if metadata else "unknown",
+                    audio_filename=metadata.filename if metadata else "unknown",
                     audio_path=self.current_workflow_audio_path,
                     job_dir=self.current_workflow_job_dir,
-                    stage="Transcription Worker Unexpected",
+                    stage="Unexpected Error",
                     error_message=str(e),
                 )
                 self.current_workflow_job_dir = None
                 self.current_workflow_audio_path = None
                 self.job_origin = "MANUAL"
-            self._set_error(f"Unexpected Processing Error: {e}")
+            self._set_error(f"Unexpected Error: {e}")
+            self._emit_event("COMPLETE", None)
 
     def copy_ai_payload(self, template_name: str = "General Meeting") -> str:
-        """Build and return WP-005B Manual AI Handoff prompt payload."""
+        """
+        Generate AI-ready payload string for the current cleaned transcript.
+        Raises ManualHandoffError if no cleaned transcript is available.
+        """
         if not self.current_transcript_result:
-            raise ManualHandoffError("No cleaned transcript available.")
+            raise ManualHandoffError("No cleaned transcript available. Please transcribe an audio file first.")
 
-        return build_manual_ai_payload(
-            transcript_input=self.current_transcript_result,
-            template_name=template_name,
-        )
+        payload = build_manual_ai_payload(self.current_transcript_result, template_name=template_name)
+        self._emit_event("PAYLOAD_COPIED", payload)
+        return payload
 
     def import_ai_result(self, raw_json_text: str) -> MeetingSummaryResult:
-        """Validate and import raw JSON response string from external AI into session."""
-        if not self.current_metadata:
-            job_id = "standalone_import"
-            language = "th"
-        else:
-            job_id = self.current_metadata.job_id
-            language = self.current_transcript_result.language if self.current_transcript_result else "th"
+        """
+        Parse and validate manually pasted AI JSON result using WP-004 contract.
+        Stores result in current session upon success.
+        """
+        job_id = self.current_transcript_result.job_id if self.current_transcript_result else "manual_job"
+        language = self.current_transcript_result.language if self.current_transcript_result else "th"
 
-        result = import_manual_ai_result(
-            raw_input_text=raw_json_text,
-            job_id=job_id,
-            language=language,
-        )
-
-        self.current_summary_result = result
-        self._emit_event("SUMMARY_IMPORTED", result)
-        self._emit_event("STATUS", f"SUMMARY_READY: Successfully imported '{result.title}'")
-        return result
+        summary_result = import_manual_ai_result(raw_json_text, job_id=job_id, language=language)
+        self.current_summary_result = summary_result
+        self._emit_event("SUMMARY_IMPORTED", summary_result)
+        return summary_result
 
     def export_meeting_package(
         self,
         output_parent: Union[str, Path],
         template_name: str = "General Meeting",
     ) -> ExportPackageResult:
-        """Export the current meeting package to destination directory."""
+        """
+        Export the current meeting package (Summary.md, Transcript.txt, AI_SUMMARY_READY.md, audio_reference.json)
+        to the specified output parent directory.
+
+        Raises ExportPackageError if required session data is missing or export fails.
+        """
         if not self.current_metadata or not self.current_transcript_result or not self.current_summary_result:
             raise ExportPackageError(
                 "Cannot export meeting package: metadata, transcript, and summary must all be completed first."
@@ -518,7 +529,6 @@ class OrbisMeetingController:
     def _set_error(self, message: str):
         self.state = "ERROR"
         self._emit_event("ERROR", message)
-        self._emit_event("STATUS", f"ERROR: {message}")
 
 
 class OrbisMeetingWindow:
