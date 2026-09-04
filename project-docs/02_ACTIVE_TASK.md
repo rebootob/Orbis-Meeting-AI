@@ -1,8 +1,8 @@
 # 02_ACTIVE_TASK.md — Active Work Package
 
 ## Work Package Details
-- **Active Work Package:** WP-009 Automatic Summary Engine (Local-First / Provider-Neutral / Zero Cloud API)
-- **Objective:** Implement local automatic summary generation (`src/orbis_meeting/auto_summary.py`) using a provider-neutral local command interface (`LocalCommandSummaryProvider`, `AutomaticSummaryService`). Integrate with `AutomaticJobRunner` (`src/orbis_meeting/job_runner.py`) so that after transcription and text cleanup succeed, if an automatic summary service is configured, the runner automatically transitions through `SUMMARIZING`, parses/validates raw JSON into a canonical `MeetingSummaryResult`, updates session state, and transitions to `SUMMARY_READY`. If summary generation fails or is unconfigured, the job is preserved safely for manual AI handoff without routing to `99_Error`.
+- **Active Work Package:** WP-010 Automatic End-to-End Completion
+- **Objective:** Extend `AutomaticJobRunner` (`src/orbis_meeting/job_runner.py`) so that when a workflow job reaches `SUMMARY_READY` via local automatic summary, the runner automatically transitions state to `COMPLETING`, invokes `controller.complete_workflow_job()`, verifies exported package outputs in `03_Completed` (Summary.md, Transcript.txt, AI_SUMMARY_READY.md, audio_reference.json, and original audio), clears active workflow session state, transitions state to `IDLE`, and allows subsequent runner scans to process the next Inbox audio file automatically. If completion fails, job state is preserved in `02_Processing` without routing to `99_Error`, state transitions to `COMPLETION_ERROR`, and manual retry is allowed.
 
 ---
 
@@ -15,26 +15,25 @@
 
 ### Forbidden Changes
 - Cloud AI APIs (OpenAI, Gemini, Claude, HTTP requests)
-- Ollama CLI / LLM model downloads or installs during WP-009
-- Shell injection / `shell=True` in subprocess calls
-- Automatic call to `complete_workflow_job()` (belongs to WP-010)
-- Multi-host coordination, distributed locks, or multi-worker concurrency
-- Telegram, LINE, email, PDF/Word export, databases, or web/mobile UIs
-- External schedulers, OS services, cron, or asyncio rewrites
+- Google Drive API, OAuth, service accounts
+- Telegram, LINE, Email, PDF/DOCX export, databases, web/mobile UIs
+- Speaker diarization, cross-meeting search, multi-host concurrency
+- External schedulers, cron, or asyncio rewrites
 
 ---
 
 ## Acceptance Criteria
-- **AC-01:** WP-001 through WP-008 remain working.
-- **AC-02:** `src/orbis_meeting/auto_summary.py` created with `AutomaticSummaryError`, `LocalCommandSummaryProvider`, `AutomaticSummaryService`.
-- **AC-03:** Local provider executes command via stdlib `subprocess` without `shell=True`.
-- **AC-04:** Complete prompt passed via stdin without truncation (or raises error if `max_input_chars` exceeded).
-- **AC-05:** Reuses WP-004 `MeetingSummaryResult` schema & strict JSON validation via `import_manual_ai_result`.
-- **AC-06:** Runner states extended with `SUMMARIZING`, `SUMMARY_READY`, `SUMMARY_ERROR`.
-- **AC-07:** Runner automatically executes summary after cleanup when service is configured.
-- **AC-08:** `current_summary_result` populated and `SUMMARY_IMPORTED` emitted on success.
-- **AC-09:** Automatic summary failure transitions to `SUMMARY_ERROR`, preserving job in `02_Processing` for manual AI fallback.
-- **AC-10:** Single-job policy & stop drain safety preserved.
-- **AC-11:** `complete_workflow_job()` is NOT called automatically in WP-009.
-- **AC-12:** Zero cloud AI API calls.
-- **AC-13:** Focused and full tests pass.
+- **AC-01:** WP-001 through WP-009 remain working.
+- **AC-02:** Automatic completion occurs after automatic `SUMMARY_READY`.
+- **AC-03:** `COMPLETING` and `COMPLETION_ERROR` runner states exist.
+- **AC-04:** Completion reuses existing workflow completion primitive (`complete_workflow_job`).
+- **AC-05:** Package created under `03_Completed`.
+- **AC-06:** Required package files exist (`Summary.md`, `Transcript.txt`, `AI_SUMMARY_READY.md`, `audio_reference.json`).
+- **AC-07:** Workflow-owned original audio is preserved/finalized safely without byte modification.
+- **AC-08:** Successful completion clears active workflow session state.
+- **AC-09:** Runner returns to `IDLE` after completion.
+- **AC-10:** Runner can process next Inbox meeting on subsequent scan (single active job policy maintained).
+- **AC-11:** Completion failure transitions to `COMPLETION_ERROR`, preserving session data and blocking next job.
+- **AC-12:** Manual retry/recovery possible.
+- **AC-13:** Stop/drain safety preserved.
+- **AC-14:** Focused and full tests pass.

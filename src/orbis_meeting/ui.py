@@ -351,6 +351,23 @@ class OrbisMeetingController:
         self.current_workflow_audio_path = None
         self.job_origin = "MANUAL"
 
+        if self.auto_runner and self.auto_runner.state in (
+            RunnerState.SUMMARY_READY,
+            RunnerState.COMPLETING,
+            RunnerState.COMPLETION_ERROR,
+            RunnerState.WAITING_FOR_SUMMARY,
+            RunnerState.SUMMARY_ERROR,
+        ):
+            new_state = RunnerState.STOPPING if self.auto_runner.is_stopping else RunnerState.IDLE
+            self.auto_runner.state = new_state
+            self.auto_runner.current_job = None
+            if self.event_queue:
+                self.event_queue.put(("RUNNER_STATE", {
+                    "state": new_state.value,
+                    "current_job": None,
+                    "is_running": self.auto_runner.is_running,
+                }))
+
         self._emit_event("WORKFLOW_COMPLETED", result)
         self._emit_event("STATUS", "WORKFLOW: Saved to local Google Drive sync folder (03_Completed).")
         return result

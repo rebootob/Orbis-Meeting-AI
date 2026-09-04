@@ -427,7 +427,7 @@ class TestAutomaticJobRunnerModule(unittest.TestCase):
         self.assertEqual(len(list(self.paths.error.iterdir())), 0)
 
 
-    def test_auto_summary_service_success(self):
+    def test_auto_summary_service_success_automatically_completes_job_and_returns_idle(self):
         from test_auto_summary import FakeProvider, create_valid_summary_json_dict
         from orbis_meeting.auto_summary import AutomaticSummaryService
 
@@ -437,33 +437,72 @@ class TestAutomaticJobRunnerModule(unittest.TestCase):
             template_name="General Meeting",
         )
 
+        audio_bytes = b"auto summary audio bytes 123"
         audio = self.paths.inbox / "auto_summary_job.mp3"
-        audio.write_bytes(b"auto summary audio bytes 123")
+        audio.write_bytes(audio_bytes)
 
         claimed = self.runner.run_once()
         self.assertEqual(claimed, "auto_summary_job.mp3")
 
-        # Runner transitions to SUMMARY_READY
-        self.assertEqual(self.runner.state, RunnerState.SUMMARY_READY)
+        # Runner state returns to IDLE after automatic completion
+        self.assertEqual(self.runner.state, RunnerState.IDLE)
 
-        # current_summary_result is set
-        self.assertIsNotNone(self.controller.current_summary_result)
-        self.assertEqual(self.controller.current_summary_result.title, "Project Sync Meeting")
+        # Verified completed package created under 03_Completed
+        completed_pkgs = list(self.paths.completed.iterdir())
+        self.assertEqual(len(completed_pkgs), 1)
+        pkg_dir = completed_pkgs[0]
 
-        # Job remains in 02_Processing (complete_workflow_job is NOT called automatically)
-        self.assertTrue(self.controller.current_workflow_job_dir.exists())
-        self.assertEqual(self.controller.current_workflow_job_dir.parent, self.paths.processing)
+        # Verified required files exist in Completed package
+        self.assertTrue((pkg_dir / "Summary.md").exists())
+        self.assertTrue((pkg_dir / "Transcript.txt").exists())
+        self.assertTrue((pkg_dir / "AI_SUMMARY_READY.md").exists())
+        self.assertTrue((pkg_dir / "audio_reference.json").exists())
 
-        # Complete Workflow Job can be called manually by user/controller
-        res = self.controller.complete_workflow_job()
-        self.assertTrue(res.package_dir.exists())
+        # Verified original audio file finalized in package with bytes preserved
+        pkg_audio = pkg_dir / "auto_summary_job.mp3"
+        self.assertTrue(pkg_audio.exists())
+        self.assertEqual(pkg_audio.read_bytes(), audio_bytes)
+
+        # Active workflow job tracking state cleared
+        self.assertIsNone(self.controller.current_workflow_job_dir)
+        self.assertEqual(self.controller.job_origin, "MANUAL")
+
+    def test_queue_continuation_processes_second_inbox_file_on_next_scan(self):
+        from test_auto_summary import FakeProvider, create_valid_summary_json_dict
+        from orbis_meeting.auto_summary import AutomaticSummaryService
+
+        valid_json = json.dumps(create_valid_summary_json_dict())
+        self.controller.auto_summary_service = AutomaticSummaryService(
+            provider=FakeProvider(response_text=valid_json),
+        )
+
+        f1 = self.paths.inbox / "01_first.mp3"
+        f1.write_bytes(b"first meeting audio")
+
+        f2 = self.paths.inbox / "02_second.mp3"
+        f2.write_bytes(b"second meeting audio")
+
+        # First run_once processes and completes 01_first.mp3
+        job1 = self.runner.run_once()
+        self.assertEqual(job1, "01_first.mp3")
+        self.assertEqual(self.runner.state, RunnerState.IDLE)
+        self.assertIsNone(self.controller.current_workflow_job_dir)
+
+        # Second run_once processes and completes 02_second.mp3
+        job2 = self.runner.run_once()
+        self.assertEqual(job2, "02_second.mp3")
+        self.assertEqual(self.runner.state, RunnerState.IDLE)
+
+        # Both packages completed under 03_Completed
+        completed_pkgs = list(self.paths.completed.iterdir())
+        self.assertEqual(len(completed_pkgs), 2)
 
     def test_auto_summary_service_failure_preserves_job_in_processing_for_manual_fallback(self):
         from test_auto_summary import FakeProvider
         from orbis_meeting.auto_summary import AutomaticSummaryService
 
         self.controller.auto_summary_service = AutomaticSummaryService(
-            provider=FakeProvider(response_text="Invalid non-JSON response"),
+            provider=FakeProvider(response_text="{invalid json}"),
             template_name="General Meeting",
         )
 
@@ -473,7 +512,7 @@ class TestAutomaticJobRunnerModule(unittest.TestCase):
         claimed = self.runner.run_once()
         self.assertEqual(claimed, "summary_fail_job.mp3")
 
-        # Runner transitions to SUMMARY_ERROR
+        # Runner transitions to SUMMARY_ERROR (no auto completion)
         self.assertEqual(self.runner.state, RunnerState.SUMMARY_ERROR)
 
         # current_summary_result is None, but current_transcript_result is preserved
@@ -485,11 +524,99 @@ class TestAutomaticJobRunnerModule(unittest.TestCase):
         self.assertTrue(self.controller.current_workflow_job_dir.exists())
         self.assertEqual(self.controller.current_workflow_job_dir.parent, self.paths.processing)
 
+        # No package created in 03_Completed
+        self.assertEqual(len(list(self.paths.completed.iterdir())), 0)
+
         # Manual Copy for AI and Manual Import AI result still work as fallback
         payload = self.controller.copy_ai_payload()
         self.assertIn("Cleaned", payload)
 
+    def test_completion_export_failure_transitions_to_completion_error_and_preserves_data(self):
+        from test_auto_summary import FakeProvider, create_valid_summary_json_dict
+        from orbis_meeting.auto_summary import AutomaticSummaryService
+
+        valid_json = json.dumps(create_valid_summary_json_dict())
+        self.controller.auto_summary_service = AutomaticSummaryService(
+            provider=FakeProvider(response_text=valid_json),
+        )
+
+        audio = self.paths.inbox / "completion_fail.mp3"
+        audio.write_bytes(b"completion fail audio")
+
+        # Mock complete_workflow_job to fail
+        def failing_complete(*args, **kwargs):
+            raise DriveWorkflowError("Disk full during export")
+
+        self.controller.complete_workflow_job = failing_complete
+
+        claimed = self.runner.run_once()
+        self.assertEqual(claimed, "completion_fail.mp3")
+
+        # Runner state becomes COMPLETION_ERROR
+        self.assertEqual(self.runner.state, RunnerState.COMPLETION_ERROR)
+
+        # Data preserved in controller and 02_Processing (NOT moved to 99_Error)
+        self.assertIsNotNone(self.controller.current_summary_result)
+        self.assertIsNotNone(self.controller.current_transcript_result)
+        self.assertIsNotNone(self.controller.current_workflow_job_dir)
+        self.assertTrue(self.controller.current_workflow_job_dir.exists())
+        self.assertEqual(len(list(self.paths.error.iterdir())), 0)
+
+        # Subsequent run_once does NOT claim new job
+        f2 = self.paths.inbox / "next_job.mp3"
+        f2.write_bytes(b"next audio")
+
+        next_claimed = self.runner.run_once()
+        self.assertIsNone(next_claimed)
+        self.assertEqual(self.runner.state, RunnerState.COMPLETION_ERROR)
+
+    def test_manual_origin_meeting_never_auto_completed(self):
+        manual_audio = Path(self.temp_dir.name) / "manual_only.mp3"
+        manual_audio.write_bytes(b"manual bytes")
+
+        self.controller.select_audio_file(manual_audio)
+        self.assertEqual(self.controller.job_origin, "MANUAL")
+
+        # run_once returns None and does not complete manual meeting
+        job = self.runner.run_once()
+        self.assertIsNone(job)
+        self.assertEqual(len(list(self.paths.completed.iterdir())), 0)
+
+    def test_retry_current_completion_recovers_from_completion_error(self):
+        from test_auto_summary import FakeProvider, create_valid_summary_json_dict
+        from orbis_meeting.auto_summary import AutomaticSummaryService
+
+        valid_json = json.dumps(create_valid_summary_json_dict())
+        self.controller.auto_summary_service = AutomaticSummaryService(
+            provider=FakeProvider(response_text=valid_json),
+        )
+
+        audio = self.paths.inbox / "retry_comp.mp3"
+        audio.write_bytes(b"retry comp audio")
+
+        orig_complete = self.controller.complete_workflow_job
+        call_counter = [0]
+
+        def flaky_complete(*args, **kwargs):
+            call_counter[0] += 1
+            if call_counter[0] == 1:
+                raise DriveWorkflowError("Temporary filesystem lock")
+            return orig_complete(*args, **kwargs)
+
+        self.controller.complete_workflow_job = flaky_complete
+
+        # First run fails at completion step -> state COMPLETION_ERROR
+        claimed = self.runner.run_once()
+        self.assertEqual(claimed, "retry_comp.mp3")
+        self.assertEqual(self.runner.state, RunnerState.COMPLETION_ERROR)
+
+        # Call retry_current_completion() -> succeeds on second attempt
+        res = self.runner.retry_current_completion()
+        self.assertTrue(res.package_dir.exists())
+        self.assertEqual(self.runner.state, RunnerState.IDLE)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

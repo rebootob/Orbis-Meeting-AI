@@ -46,6 +46,8 @@ class RunnerState(str, Enum):
     SUMMARIZING = "SUMMARIZING"
     SUMMARY_READY = "SUMMARY_READY"
     SUMMARY_ERROR = "SUMMARY_ERROR"
+    COMPLETING = "COMPLETING"
+    COMPLETION_ERROR = "COMPLETION_ERROR"
     ERROR = "ERROR"
 
 
@@ -204,7 +206,13 @@ class AutomaticJobRunner:
         # If there is already an active workflow job in processing or waiting for summary, pause scanning.
         if self.controller.job_origin == "WORKFLOW" and self.controller.current_workflow_job_dir is not None:
             if self.controller.current_transcript_result is not None:
-                if self.state in (RunnerState.SUMMARY_READY, RunnerState.SUMMARY_ERROR, RunnerState.WAITING_FOR_SUMMARY):
+                if self.state in (
+                    RunnerState.SUMMARY_READY,
+                    RunnerState.SUMMARY_ERROR,
+                    RunnerState.WAITING_FOR_SUMMARY,
+                    RunnerState.COMPLETING,
+                    RunnerState.COMPLETION_ERROR,
+                ):
                     target_state = self.state
                 elif self.controller.current_summary_result is not None:
                     target_state = RunnerState.SUMMARY_READY
@@ -322,9 +330,52 @@ class AutomaticJobRunner:
                         self.event_queue.put(("SUMMARY_IMPORTED", summary_res))
                         self.event_queue.put(("STATUS", f"WORKFLOW AUTO: Local AI summary ready for {metadata.filename}."))
 
-                    final_state = RunnerState.STOPPING if self._stop_event.is_set() else RunnerState.SUMMARY_READY
-                    self._set_state(final_state, metadata.filename)
-                    return metadata.filename
+                    self._set_state(
+                        RunnerState.STOPPING if self._stop_event.is_set() else RunnerState.SUMMARY_READY,
+                        metadata.filename,
+                    )
+
+                    if self._stop_event.is_set():
+                        return metadata.filename
+
+                    # Step 9: Automatic End-to-End Completion (WP-010)
+                    self._set_state(RunnerState.COMPLETING, metadata.filename)
+                    if self.event_queue:
+                        self.event_queue.put(("STATUS", f"WORKFLOW AUTO: Exporting completed meeting package for {metadata.filename}..."))
+
+                    try:
+                        template_name = getattr(self.controller, "summary_template", "General Meeting")
+                        complete_res = self.controller.complete_workflow_job(template_name=template_name)
+
+                        # Validate completion invariants
+                        if not complete_res or not complete_res.package_dir.exists():
+                            raise JobRunnerError("Exported package directory does not exist after completion.")
+                        if not (complete_res.package_dir / "Summary.md").exists():
+                            raise JobRunnerError("Summary.md missing in exported package.")
+                        if not (complete_res.package_dir / "Transcript.txt").exists():
+                            raise JobRunnerError("Transcript.txt missing in exported package.")
+                        if not (complete_res.package_dir / "AI_SUMMARY_READY.md").exists():
+                            raise JobRunnerError("AI_SUMMARY_READY.md missing in exported package.")
+                        if not (complete_res.package_dir / "audio_reference.json").exists():
+                            raise JobRunnerError("audio_reference.json missing in exported package.")
+
+                        if self.event_queue:
+                            self.event_queue.put(("STATUS", "WORKFLOW AUTO: Meeting completed to local Google Drive sync folder."))
+
+                        final_state = RunnerState.STOPPING if self._stop_event.is_set() else RunnerState.IDLE
+                        self._set_state(final_state, None)
+                        return metadata.filename
+
+                    except Exception as e:
+                        # Completion failure: preserve current summary, transcript, audio, processing job dir
+                        # Transition state to COMPLETION_ERROR without sending to 99_Error
+                        if self.event_queue:
+                            self.event_queue.put(("ERROR", f"Auto Completion Error: {e}"))
+                            self.event_queue.put(("STATUS", f"WORKFLOW AUTO COMPLETION ERROR: {e}. Session data preserved for retry."))
+
+                        err_state = RunnerState.STOPPING if self._stop_event.is_set() else RunnerState.COMPLETION_ERROR
+                        self._set_state(err_state, metadata.filename)
+                        return metadata.filename
 
                 except Exception as e:
                     # Automatic summary failure:
@@ -372,4 +423,32 @@ class AutomaticJobRunner:
             err_state = RunnerState.STOPPING if self._stop_event.is_set() else RunnerState.IDLE
             self._set_state(err_state, None)
             return None
+
+    def retry_current_completion(self) -> Any:
+        """
+        Retry automatic completion for the current job if state is COMPLETION_ERROR or SUMMARY_READY.
+        """
+        with self._lock:
+            if self.state not in (RunnerState.COMPLETION_ERROR, RunnerState.SUMMARY_READY):
+                raise JobRunnerError(f"Cannot retry completion while runner state is {self.state.value}.")
+
+            filename = self.current_job or (
+                self.controller.current_metadata.filename if self.controller.current_metadata else "job"
+            )
+
+        self._set_state(RunnerState.COMPLETING, filename)
+        try:
+            template_name = getattr(self.controller, "summary_template", "General Meeting")
+            res = self.controller.complete_workflow_job(template_name=template_name)
+
+            if not res or not res.package_dir.exists():
+                raise JobRunnerError("Exported package directory does not exist after completion.")
+
+            final_state = RunnerState.STOPPING if self._stop_event.is_set() else RunnerState.IDLE
+            self._set_state(final_state, None)
+            return res
+        except Exception as e:
+            err_state = RunnerState.STOPPING if self._stop_event.is_set() else RunnerState.COMPLETION_ERROR
+            self._set_state(err_state, filename)
+            raise
 
