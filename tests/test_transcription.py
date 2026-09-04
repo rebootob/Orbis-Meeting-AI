@@ -3,10 +3,12 @@ Unit tests for WP-002 Local Whisper Transcription Foundation
 """
 
 import hashlib
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 # Ensure src/ is in python path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -17,6 +19,11 @@ from orbis_meeting.transcription import (
     TranscriptionResult,
     TranscriptionSegment,
     WhisperTranscriptionService,
+    WhisperRuntimeConfig,
+    WhisperRuntimeConfigError,
+    load_whisper_runtime_config_from_environment,
+    build_transcription_service_from_environment,
+    format_whisper_runtime_status,
 )
 
 
@@ -203,5 +210,79 @@ class TestTranscription(unittest.TestCase):
         self.assertIn("does not exist", str(ctx.exception))
 
 
+class TestWhisperRuntimeConfig(unittest.TestCase):
+
+    def test_default_environment_variables(self):
+        """Test default Whisper config when environment variables are unset."""
+        env_dict = os.environ.copy()
+        env_dict.pop("ORBIS_WHISPER_MODEL", None)
+        env_dict.pop("ORBIS_WHISPER_DEVICE", None)
+        env_dict.pop("ORBIS_WHISPER_COMPUTE_TYPE", None)
+        with patch.dict(os.environ, env_dict, clear=True):
+            config = load_whisper_runtime_config_from_environment()
+            self.assertEqual(config.model_name, "large-v3")
+            self.assertEqual(config.device, "cpu")
+            self.assertEqual(config.compute_type, "default")
+            self.assertEqual(format_whisper_runtime_status(config), "large-v3 | CPU | default")
+
+    def test_custom_environment_variables_and_whitespace_trimming(self):
+        """Test loading custom environment variables with whitespace trimming."""
+        custom_env = {
+            "ORBIS_WHISPER_MODEL": "  medium  ",
+            "ORBIS_WHISPER_DEVICE": " CUDA ",
+            "ORBIS_WHISPER_COMPUTE_TYPE": " float16 ",
+        }
+        with patch.dict(os.environ, custom_env):
+            config = load_whisper_runtime_config_from_environment()
+            self.assertEqual(config.model_name, "medium")
+            self.assertEqual(config.device, "cuda")
+            self.assertEqual(config.compute_type, "float16")
+            self.assertEqual(format_whisper_runtime_status(config), "medium | CUDA | float16")
+
+    def test_invalid_device_raises_config_error(self):
+        """Test rejection of unsupported or invalid device string."""
+        with patch.dict(os.environ, {"ORBIS_WHISPER_DEVICE": "tpu"}):
+            with self.assertRaises(WhisperRuntimeConfigError) as ctx:
+                load_whisper_runtime_config_from_environment()
+            self.assertIn("Supported devices are 'cpu' and 'cuda'", str(ctx.exception))
+
+    def test_empty_model_raises_config_error(self):
+        """Test rejection of explicitly set empty or whitespace-only model string."""
+        with patch.dict(os.environ, {"ORBIS_WHISPER_MODEL": "   "}):
+            with self.assertRaises(WhisperRuntimeConfigError) as ctx:
+                load_whisper_runtime_config_from_environment()
+            self.assertIn("ORBIS_WHISPER_MODEL environment variable cannot be empty", str(ctx.exception))
+
+    def test_empty_compute_type_raises_config_error(self):
+        """Test rejection of explicitly set empty compute type string."""
+        with patch.dict(os.environ, {"ORBIS_WHISPER_COMPUTE_TYPE": ""}):
+            with self.assertRaises(WhisperRuntimeConfigError) as ctx:
+                load_whisper_runtime_config_from_environment()
+            self.assertIn("ORBIS_WHISPER_COMPUTE_TYPE environment variable cannot be empty", str(ctx.exception))
+
+    def test_build_service_with_dependency_injection(self):
+        """Test building service from env with mock backend injection."""
+        custom_env = {
+            "ORBIS_WHISPER_MODEL": "small",
+            "ORBIS_WHISPER_DEVICE": "cpu",
+            "ORBIS_WHISPER_COMPUTE_TYPE": "int8",
+        }
+        mock_backend = MockWhisperModel()
+        with patch.dict(os.environ, custom_env):
+            service = build_transcription_service_from_environment(model_backend=mock_backend)
+            self.assertEqual(service.model_name, "small")
+            self.assertEqual(service.device, "cpu")
+            self.assertEqual(service.compute_type, "int8")
+            self.assertEqual(service._model, mock_backend)
+            self.assertEqual(format_whisper_runtime_status(service), "small | CPU | int8")
+
+    def test_lazy_loading_preserved_no_downloads(self):
+        """Test that building service from environment does not trigger model loading or downloads."""
+        service = build_transcription_service_from_environment(model_backend=None)
+        # Internal model backend must remain None until transcribe() is executed
+        self.assertIsNone(service._model)
+
+
 if __name__ == "__main__":
     unittest.main()
+

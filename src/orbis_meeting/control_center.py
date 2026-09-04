@@ -62,6 +62,8 @@ class ControlCenterSnapshot:
     current_job_name: Optional[str]
     recent_completed: List[RecentCompletedItem]
     recent_errors: List[RecentErrorItem]
+    whisper_engine_status: str = "large-v3 | CPU | default"
+
 
 
 UI_TEXT: Dict[str, Dict[str, str]] = {
@@ -82,6 +84,7 @@ UI_TEXT: Dict[str, Dict[str, str]] = {
         "stat_completed": "เสร็จสมบูรณ์ (Completed)",
         "stat_error": "เกิดข้อผิดพลาด (Error)",
         "summary_engine_status": "เครื่องมือสรุปผล AI:",
+        "whisper_engine_status": "ระบบถอดเสียง:",
         "recent_completed_title": "รายการประชุมเสร็จสมบูรณ์ล่าสุด (10 รายการแรก)",
         "recent_errors_title": "รายการข้อผิดพลาดล่าสุด (10 รายการแรก)",
         "col_title": "ชื่อหัวข้อประชุม / โฟลเดอร์",
@@ -131,6 +134,7 @@ UI_TEXT: Dict[str, Dict[str, str]] = {
         "stat_completed": "Completed Packages",
         "stat_error": "Error Packages",
         "summary_engine_status": "Summary Engine:",
+        "whisper_engine_status": "Whisper Engine:",
         "recent_completed_title": "Recent Completed Meetings (Top 10)",
         "recent_errors_title": "Recent Job Failures (Top 10)",
         "col_title": "Meeting Title / Folder",
@@ -287,6 +291,13 @@ def get_control_center_snapshot(
         elif getattr(controller, "summary_engine_status", None):
             summary_engine_provider = controller.summary_engine_status
 
+    # Extract Whisper Engine Status
+    from orbis_meeting.transcription import format_whisper_runtime_status
+    if controller is not None and getattr(controller, "transcription_service", None) is not None:
+        whisper_engine_status = format_whisper_runtime_status(controller.transcription_service)
+    else:
+        whisper_engine_status = format_whisper_runtime_status()
+
     # 4. Handle unconfigured/missing workflow paths
     if not resolved_paths or not resolved_paths.root or not resolved_paths.root.exists():
         return ControlCenterSnapshot(
@@ -301,6 +312,7 @@ def get_control_center_snapshot(
             current_job_name=current_job_name,
             recent_completed=[],
             recent_errors=[],
+            whisper_engine_status=whisper_engine_status,
         )
 
     # 5. Scan 01_Inbox
@@ -433,4 +445,5 @@ def get_control_center_snapshot(
         current_job_name=current_job_name,
         recent_completed=recent_completed_items,
         recent_errors=recent_error_items,
+        whisper_engine_status=whisper_engine_status,
     )

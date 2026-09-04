@@ -19,7 +19,13 @@ from pathlib import Path
 from typing import Optional, Union, Callable, Dict, Any
 
 from orbis_meeting.audio_intake import validate_and_intake_audio, AudioJobMetadata, AudioIntakeError
-from orbis_meeting.transcription import WhisperTranscriptionService, TranscriptionResult, TranscriptionError
+from orbis_meeting.transcription import (
+    WhisperTranscriptionService,
+    TranscriptionResult,
+    TranscriptionError,
+    build_transcription_service_from_environment,
+    format_whisper_runtime_status,
+)
 from orbis_meeting.text_cleanup import TextCleanupService, TextCleanupError
 from orbis_meeting.summary import MeetingSummaryResult
 from orbis_meeting.manual_handoff import (
@@ -150,7 +156,10 @@ class OrbisMeetingController:
         error_callback: Optional[Callable[[str], None]] = None,
         on_complete_callback: Optional[Callable[[], None]] = None,
     ):
-        self.transcription_service = transcription_service or WhisperTranscriptionService()
+        if transcription_service is not None:
+            self.transcription_service = transcription_service
+        else:
+            self.transcription_service = build_transcription_service_from_environment()
         self.cleanup_service = cleanup_service or TextCleanupService()
         if auto_summary_service is not None:
             self.auto_summary_service = auto_summary_service
@@ -855,6 +864,14 @@ class OrbisMeetingWindow:
         engine_row = ttk.Frame(handoff_frame)
         engine_row.pack(fill=tk.X, pady=(0, 5))
 
+        whisper_text = f"{get_text(self.current_lang, 'whisper_engine_status')} {format_whisper_runtime_status(self.controller.transcription_service)}"
+        self.whisper_engine_status_label = ttk.Label(
+            engine_row,
+            text=whisper_text,
+            font=("Helvetica", 9, "bold"),
+        )
+        self.whisper_engine_status_label.pack(side=tk.LEFT, padx=(0, 15))
+
         self.summary_engine_status_label = ttk.Label(
             engine_row,
             text=self.controller.summary_engine_status,
@@ -1008,6 +1025,13 @@ class OrbisMeetingWindow:
         )
         self.lbl_cc_current_job.pack(side=tk.LEFT, padx=(0, 15))
 
+        self.lbl_cc_whisper_engine = ttk.Label(
+            sys_status_frame,
+            text=f"{get_text(self.current_lang, 'whisper_engine_status')} {format_whisper_runtime_status(self.controller.transcription_service)}",
+            font=("Helvetica", 9),
+        )
+        self.lbl_cc_whisper_engine.pack(side=tk.LEFT, padx=(0, 15))
+
         self.lbl_cc_summary_engine = ttk.Label(
             sys_status_frame, text=f"Summary Engine: {self.controller.summary_engine_status}", font=("Helvetica", 9)
         )
@@ -1146,6 +1170,9 @@ class OrbisMeetingWindow:
             self.start_runner_button.config(text=get_text(lang, "start_runner_btn"))
         if hasattr(self, "stop_runner_button"):
             self.stop_runner_button.config(text=get_text(lang, "stop_runner_btn"))
+        if hasattr(self, "whisper_engine_status_label"):
+            whisper_text = f"{get_text(lang, 'whisper_engine_status')} {format_whisper_runtime_status(self.controller.transcription_service)}"
+            self.whisper_engine_status_label.config(text=whisper_text)
 
         # Update Control Center Tab Frames & Headings
         if hasattr(self, "cc_stat_inbox_frame"):
@@ -1195,6 +1222,9 @@ class OrbisMeetingWindow:
 
         job_str = f"{get_text(self.current_lang, 'current_job')} {snapshot.current_job_name or 'N/A'}"
         self.lbl_cc_current_job.config(text=job_str)
+
+        whisper_str = f"{get_text(self.current_lang, 'whisper_engine_status')} {snapshot.whisper_engine_status}"
+        self.lbl_cc_whisper_engine.config(text=whisper_str)
 
         engine_str = f"{get_text(self.current_lang, 'summary_engine_status')} {snapshot.summary_engine_provider}"
         self.lbl_cc_summary_engine.config(text=engine_str)

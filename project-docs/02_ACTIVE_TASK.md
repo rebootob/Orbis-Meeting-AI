@@ -1,8 +1,8 @@
 # 02_ACTIVE_TASK.md — Active Work Package
 
 ## Work Package Details
-- **Active Work Package:** WP-011 Control Center / Job History
-- **Objective:** Provide a filesystem-based read-only Control Center & Job History module (`src/orbis_meeting/control_center.py`) and a bilingual (Thai / English) Tkinter UI integration (`src/orbis_meeting/ui.py`). Features include counting audio files in `01_Inbox`, processing jobs in `02_Processing`, completed packages in `03_Completed`, and error directories in `99_Error`; displaying up to 10 most recent completed meetings and error packages (parsing `error.json` with safe fallback handling); offering safe native OS folder opening (`os.startfile`); supporting runtime language toggle (TH | EN) without app restart while leaving internal runner states ("TRANSCRIBING", "COMPLETING", etc.) unchanged; and enabling "Retry Completion" ONLY when runner state is `COMPLETION_ERROR`.
+- **Active Work Package:** WP-012 Whisper Runtime Performance Configuration
+- **Objective:** Provide runtime configuration of local Whisper speech-to-text parameters (`ORBIS_WHISPER_MODEL`, `ORBIS_WHISPER_DEVICE`, `ORBIS_WHISPER_COMPUTE_TYPE`) via standard environment variables without changing source code. Default values maintain backward compatibility (`large-v3`, `cpu`, `default`). Validation rules enforce safe string trimming, reject empty explicitly-set values, and restrict devices to `cpu` or `cuda` (case-insensitive check). Features include environment config loading (`load_whisper_runtime_config_from_environment`), service factory (`build_transcription_service_from_environment`), status formatting (`format_whisper_runtime_status`), and display in main workflow and control center snapshot with bilingual TH/EN text labels (`ระบบถอดเสียง:`, `Whisper Engine:`).
 
 ---
 
@@ -14,23 +14,23 @@
 - `project-docs/**`
 
 ### Forbidden Changes
-- Database (SQLite, PostgreSQL, ORM) or web dashboard
+- GPU auto-probing, `nvidia-smi` execution, cuDNN installer automation, or silent fallback from `cuda` to `cpu`
+- Settings UI dropdowns, settings save buttons, settings database, or JSON config file persistence
+- Network calls or model downloading during automated unit tests
 - Cloud AI APIs (OpenAI, Gemini, Claude, HTTP requests)
-- Google Drive API, OAuth, service accounts
-- Telegram, LINE, Email, PDF/DOCX export, mobile UIs
-- Speaker diarization, cross-meeting search, multi-host concurrency
 - External schedulers, cron, or asyncio rewrites
 
 ---
 
 ## Acceptance Criteria
-- **AC-01:** WP-001 through WP-010 remain working.
-- **AC-02:** Pure read-only filesystem scanning without database or file mutations in Control Center.
-- **AC-03:** Accurate folder counts for `01_Inbox`, `02_Processing`, `03_Completed`, and `99_Error`.
-- **AC-04:** Displays top 10 recent completed packages (sorted by mtime descending) with title extraction from `Summary.md`.
-- **AC-05:** Displays top 10 recent error packages (sorted by mtime descending) with safe fallback if `error.json` is corrupt or missing.
-- **AC-06:** Native OS folder opening (`open_folder_in_os`) handles non-existent paths gracefully.
-- **AC-07:** Bilingual UI support (TH / EN) with runtime language toggle.
-- **AC-08:** Internal state strings remain unchanged; translated strictly for display.
-- **AC-09:** Retry Completion button enabled ONLY when runner state is `COMPLETION_ERROR`.
-- **AC-10:** Comprehensive unit test suite (164 tests) passes cleanly.
+- **AC-01:** WP-001 through WP-011 remain working.
+- **AC-02:** Environment variables `ORBIS_WHISPER_MODEL`, `ORBIS_WHISPER_DEVICE`, `ORBIS_WHISPER_COMPUTE_TYPE` load cleanly with defaults (`large-v3`, `cpu`, `default`).
+- **AC-03:** Whitespace on env values is trimmed; empty explicitly-set values raise `WhisperRuntimeConfigError`.
+- **AC-04:** Device validation accepts case-insensitive `cpu` and `cuda`; invalid devices raise `WhisperRuntimeConfigError`.
+- **AC-05:** Dependency injection via `model_backend` is preserved in `build_transcription_service_from_environment`.
+- **AC-06:** Model lazy-loading is preserved; no model downloading during initialization or tests.
+- **AC-07:** Whisper runtime status string formatted cleanly (e.g. `large-v3 | CPU | default`, `medium | CUDA | float16`).
+- **AC-08:** Bilingual UI labels added (TH: `ระบบถอดเสียง:`, EN: `Whisper Engine:`) in Control Center and Main Workflow tab.
+- **AC-09:** Display-only status without setting save buttons or configuration database.
+- **AC-10:** Comprehensive unit test suite (177 tests) passes cleanly.
+

@@ -2,18 +2,25 @@
 Unit tests for WP-005A, WP-005B & WP-005C Local Desktop UI Shell and Summary Viewer
 """
 
+import os
 import queue
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from typing import List, Optional
+from unittest.mock import patch, MagicMock
 
 # Ensure src/ is in python path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from orbis_meeting.audio_intake import AudioJobMetadata
-from orbis_meeting.transcription import TranscriptionResult, TranscriptionSegment, TranscriptionError
+from orbis_meeting.transcription import (
+    TranscriptionResult,
+    TranscriptionSegment,
+    TranscriptionError,
+    format_whisper_runtime_status,
+)
 from orbis_meeting.text_cleanup import TextCleanupError
 from orbis_meeting.manual_handoff import ManualHandoffError
 from orbis_meeting.summary import MeetingSummaryResult, ActionItem
@@ -368,5 +375,29 @@ class TestUIController(unittest.TestCase):
         self.assertEqual(post_stat.st_size, initial_stat.st_size)
 
 
+class TestWhisperUIIntegration(unittest.TestCase):
+
+    def test_controller_initializes_with_environment_whisper_config(self):
+        """Test OrbisMeetingController initialization loading Whisper config from environment when service is None."""
+        custom_env = {
+            "ORBIS_WHISPER_MODEL": "medium",
+            "ORBIS_WHISPER_DEVICE": "cuda",
+            "ORBIS_WHISPER_COMPUTE_TYPE": "float16",
+        }
+        with patch.dict(os.environ, custom_env):
+            controller = OrbisMeetingController(transcription_service=None)
+            self.assertEqual(controller.transcription_service.model_name, "medium")
+            self.assertEqual(controller.transcription_service.device, "cuda")
+            self.assertEqual(controller.transcription_service.compute_type, "float16")
+            self.assertEqual(format_whisper_runtime_status(controller.transcription_service), "medium | CUDA | float16")
+
+    def test_controller_preserves_custom_injected_transcription_service(self):
+        """Test that passing custom transcription_service overrides environment loading."""
+        custom_service = FakeTranscriptionService()
+        controller = OrbisMeetingController(transcription_service=custom_service)
+        self.assertEqual(controller.transcription_service, custom_service)
+
+
 if __name__ == "__main__":
     unittest.main()
+

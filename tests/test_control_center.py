@@ -193,6 +193,19 @@ class TestControlCenter(unittest.TestCase):
         self.assertEqual(snapshot.current_job_name, "meeting_audio.mp3")
         self.assertTrue(snapshot.summary_engine_enabled)
         self.assertEqual(snapshot.summary_engine_provider, "Summary Engine: Local Automatic Ready")
+        self.assertEqual(snapshot.whisper_engine_status, "large-v3 | CPU | default")
+
+    def test_whisper_runtime_status_in_control_center_snapshot(self):
+        """Test Whisper runtime status reporting in Control Center snapshot."""
+        mock_controller = MagicMock()
+        mock_service = MagicMock()
+        mock_service.model_name = "medium"
+        mock_service.device = "cuda"
+        mock_service.compute_type = "float16"
+        mock_controller.transcription_service = mock_service
+
+        snapshot = get_control_center_snapshot(controller=mock_controller)
+        self.assertEqual(snapshot.whisper_engine_status, "medium | CUDA | float16")
 
     def test_wp010_completion_safety_preserved_on_completion_failure(self):
         """Test that completion failure in controller does not route to 99_Error or clear state."""

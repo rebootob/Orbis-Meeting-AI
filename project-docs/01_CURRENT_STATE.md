@@ -3,8 +3,8 @@
 ```yaml
 PROJECT: Orbis Meeting AI
 V1: IN PROGRESS
-CURRENT_GATE: WP-011 REVIEW
-ACTIVE_WORK_PACKAGE: WP-011
+CURRENT_GATE: WP-012 REVIEW
+ACTIVE_WORK_PACKAGE: WP-012
 ACTIVE_AGENT: NONE
 ANTIGRAVITY: STOP
 CLAUDE_CODE: STOP
@@ -24,7 +24,8 @@ CLAUDE_CODE: STOP
 - **WP-008 Gate:** PASS / CLOSED.
 - **WP-009 Gate:** PASS / CLOSED.
 - **WP-010 Gate:** PASS / CLOSED (Automatic End-to-End Completion).
-- **WP-011 Implementation:** Committed and awaiting independent ChatGPT review.
-- **WP-011 Gate:** CURRENT_GATE is WP-011 REVIEW (WP-011 is NOT closed until reviewer PASS).
+- **WP-011 Gate:** PASS / CLOSED (Control Center & Job History).
+- **WP-012 Implementation:** Committed and awaiting independent ChatGPT review.
+- **WP-012 Gate:** CURRENT_GATE is WP-012 REVIEW (WP-012 is NOT closed until reviewer PASS).
 - **Later WPs:** NOT AUTHORIZED.
 - **Execution Agents:** ANTIGRAVITY = STOP, CLAUDE_CODE = STOP.

@@ -5,6 +5,7 @@ Provides local speech-to-text transcription for validated audio files using fast
 Returns structured raw transcripts with timestamped segments without modifying original audio.
 """
 
+import os
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Union
@@ -15,6 +16,19 @@ from orbis_meeting.audio_intake import AudioJobMetadata, validate_and_intake_aud
 class TranscriptionError(RuntimeError):
     """Raised when transcription fails during model loading or execution."""
     pass
+
+
+class WhisperRuntimeConfigError(ValueError):
+    """Raised when Whisper runtime configuration environment variables are invalid."""
+    pass
+
+
+@dataclass(frozen=True)
+class WhisperRuntimeConfig:
+    """Runtime configuration for local Whisper transcription engine."""
+    model_name: str = "large-v3"
+    device: str = "cpu"
+    compute_type: str = "default"
 
 
 @dataclass(frozen=True)
@@ -150,3 +164,104 @@ class WhisperTranscriptionService:
             full_text=full_text,
             segments=parsed_segments,
         )
+
+
+def load_whisper_runtime_config_from_environment() -> WhisperRuntimeConfig:
+    """
+    Load and validate Whisper runtime configuration from environment variables.
+
+    Environment variables:
+    - ORBIS_WHISPER_MODEL (default: "large-v3")
+    - ORBIS_WHISPER_DEVICE (default: "cpu", supported: "cpu", "cuda")
+    - ORBIS_WHISPER_COMPUTE_TYPE (default: "default")
+
+    Raises WhisperRuntimeConfigError if explicitly provided env variables are invalid or empty.
+    """
+    raw_model = os.environ.get("ORBIS_WHISPER_MODEL")
+    if raw_model is not None:
+        model_name = raw_model.strip()
+        if not model_name:
+            raise WhisperRuntimeConfigError("ORBIS_WHISPER_MODEL environment variable cannot be empty.")
+    else:
+        model_name = "large-v3"
+
+    raw_device = os.environ.get("ORBIS_WHISPER_DEVICE")
+    if raw_device is not None:
+        device_str = raw_device.strip().lower()
+        if not device_str:
+            raise WhisperRuntimeConfigError("ORBIS_WHISPER_DEVICE environment variable cannot be empty.")
+        if device_str not in {"cpu", "cuda"}:
+            raise WhisperRuntimeConfigError(
+                f"Invalid ORBIS_WHISPER_DEVICE '{raw_device}'. Supported devices are 'cpu' and 'cuda'."
+            )
+        device = device_str
+    else:
+        device = "cpu"
+
+    raw_compute = os.environ.get("ORBIS_WHISPER_COMPUTE_TYPE")
+    if raw_compute is not None:
+        compute_type = raw_compute.strip()
+        if not compute_type:
+            raise WhisperRuntimeConfigError("ORBIS_WHISPER_COMPUTE_TYPE environment variable cannot be empty.")
+    else:
+        compute_type = "default"
+
+    return WhisperRuntimeConfig(
+        model_name=model_name,
+        device=device,
+        compute_type=compute_type,
+    )
+
+
+def build_transcription_service_from_environment(
+    model_backend: Optional[Any] = None,
+) -> WhisperTranscriptionService:
+    """
+    Build a WhisperTranscriptionService using environment variable runtime configuration.
+    Preserves dependency injection via model_backend for unit testing without downloading models.
+    """
+    config = load_whisper_runtime_config_from_environment()
+    return WhisperTranscriptionService(
+        model_name=config.model_name,
+        device=config.device,
+        compute_type=config.compute_type,
+        model_backend=model_backend,
+    )
+
+
+def format_whisper_runtime_status(
+    config_or_service: Optional[Union[WhisperRuntimeConfig, WhisperTranscriptionService]] = None,
+) -> str:
+    """
+    Format a bounded status string representation of the Whisper runtime configuration.
+    Example: 'large-v3 | CPU | default' or 'medium | CUDA | int8_float16'
+    """
+    if config_or_service is None:
+        try:
+            config = load_whisper_runtime_config_from_environment()
+            model_name = config.model_name
+            device = config.device.upper()
+            compute_type = config.compute_type
+        except Exception:
+            model_name = "large-v3"
+            device = "CPU"
+            compute_type = "default"
+    elif isinstance(config_or_service, WhisperRuntimeConfig):
+        model_name = config_or_service.model_name
+        device = config_or_service.device.upper()
+        compute_type = config_or_service.compute_type
+    elif isinstance(config_or_service, WhisperTranscriptionService):
+        model_name = config_or_service.model_name
+        device = str(config_or_service.device).upper()
+        compute_type = config_or_service.compute_type
+    else:
+        raw_model = getattr(config_or_service, "model_name", "large-v3")
+        raw_device = getattr(config_or_service, "device", "cpu")
+        raw_compute = getattr(config_or_service, "compute_type", "default")
+
+        model_name = raw_model if isinstance(raw_model, str) and raw_model else "large-v3"
+        device = (raw_device if isinstance(raw_device, str) and raw_device else "cpu").upper()
+        compute_type = raw_compute if isinstance(raw_compute, str) and raw_compute else "default"
+
+    return f"{model_name} | {device} | {compute_type}"
+
