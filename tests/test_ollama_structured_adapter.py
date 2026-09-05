@@ -2,6 +2,7 @@
 Unit Tests for WP-013 Ollama Structured Local Summary Adapter
 """
 
+import inspect
 import io
 import json
 import os
@@ -15,6 +16,7 @@ from unittest.mock import patch, MagicMock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from orbis_meeting.ollama_structured_adapter import (
+    OLLAMA_LOCAL_ENDPOINT,
     ORBIS_SUMMARY_JSON_SCHEMA,
     query_ollama_structured_api,
     main as adapter_main,
@@ -65,7 +67,6 @@ class TestOllamaStructuredAdapter(unittest.TestCase):
             resp_text = query_ollama_structured_api(
                 prompt=self.sample_thai_prompt,
                 model="qwen3:4b",
-                endpoint="http://127.0.0.1:11434/api/generate",
                 timeout=120.0,
             )
 
@@ -84,6 +85,23 @@ class TestOllamaStructuredAdapter(unittest.TestCase):
             self.assertFalse(payload["think"])
             self.assertEqual(payload["options"]["temperature"], 0)
             self.assertEqual(payload["format"], ORBIS_SUMMARY_JSON_SCHEMA)
+
+    def test_endpoint_is_locked_to_localhost(self):
+        """Test that the adapter endpoint is strictly locked to OLLAMA_LOCAL_ENDPOINT."""
+        self.assertEqual(OLLAMA_LOCAL_ENDPOINT, "http://127.0.0.1:11434/api/generate")
+
+    def test_cli_rejects_endpoint_argument(self):
+        """Test that CLI parser rejects --endpoint parameter."""
+        err_capture = io.StringIO()
+        with patch("sys.stderr", err_capture):
+            with self.assertRaises(SystemExit):
+                adapter_main(["--endpoint", "http://external-host:11434/api/generate"])
+        self.assertIn("unrecognized arguments: --endpoint", err_capture.getvalue())
+
+    def test_query_function_has_no_endpoint_parameter(self):
+        """Test that query_ollama_structured_api function signature does not expose an endpoint parameter."""
+        sig = inspect.signature(query_ollama_structured_api)
+        self.assertNotIn("endpoint", sig.parameters)
 
     def test_json_schema_contains_required_orbis_fields(self):
         """Test that ORBIS_SUMMARY_JSON_SCHEMA represents exact V1 summary contract."""

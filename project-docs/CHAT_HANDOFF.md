@@ -9,7 +9,7 @@
    4. `project-docs/04_SCOPE_BOUNDARY.md`
    Read other documents only when directly relevant.
 2. **WP-000 through WP-012 Status:** WP-000 through WP-012 are PASS / CLOSED.
-3. **WP-013 Status:** WP-013 Ollama Structured Local Summary Adapter is implemented, verified with 192 unit tests, committed, and in REVIEW.
+3. **WP-013 Status:** WP-013 Ollama Structured Local Summary Adapter is implemented, verified with 195 unit tests, committed, and in REVIEW.
 4. **Do Not Auto-Start Future WPs:** Do not automatically launch subsequent Work Packages without explicit human Owner approval.
 5. **Do Not Expand Scope:** Enforce locked V1 scope boundaries. Reject any premature requests for web apps, mobile apps, Google Drive API, Telegram, LINE, databases, or speaker diarization.
 6. **Use Antigravity Only When Necessary and Authorized:** Assign code implementation tasks to Antigravity only when explicitly authorized by the Owner.

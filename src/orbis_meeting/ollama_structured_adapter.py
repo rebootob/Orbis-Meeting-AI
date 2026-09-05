@@ -21,6 +21,8 @@ import urllib.error
 import urllib.request
 from typing import Dict, Any, Optional
 
+OLLAMA_LOCAL_ENDPOINT = "http://127.0.0.1:11434/api/generate"
+
 ORBIS_SUMMARY_JSON_SCHEMA: Dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -72,7 +74,6 @@ ORBIS_SUMMARY_JSON_SCHEMA: Dict[str, Any] = {
 def query_ollama_structured_api(
     prompt: str,
     model: str = "qwen3:4b",
-    endpoint: str = "http://127.0.0.1:11434/api/generate",
     timeout: float = 300.0,
     schema: Optional[Dict[str, Any]] = None,
 ) -> str:
@@ -96,7 +97,7 @@ def query_ollama_structured_api(
 
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
-        endpoint,
+        OLLAMA_LOCAL_ENDPOINT,
         data=data,
         headers={"Content-Type": "application/json; charset=utf-8"},
         method="POST",
@@ -109,7 +110,7 @@ def query_ollama_structured_api(
         err_body = e.read().decode("utf-8", errors="replace") if hasattr(e, "read") else ""
         raise RuntimeError(f"Ollama API HTTP {e.code} error: {e.reason}. Detail: {err_body}") from e
     except urllib.error.URLError as e:
-        raise RuntimeError(f"Failed to connect to local Ollama API at {endpoint}: {e.reason}") from e
+        raise RuntimeError(f"Failed to connect to local Ollama API at {OLLAMA_LOCAL_ENDPOINT}: {e.reason}") from e
     except Exception as e:
         raise RuntimeError(f"Error querying local Ollama API: {e}") from e
 
@@ -139,12 +140,6 @@ def main(args_list: Optional[list] = None) -> int:
         help="Ollama model name (default: qwen3:4b)",
     )
     parser.add_argument(
-        "--endpoint",
-        type=str,
-        default="http://127.0.0.1:11434/api/generate",
-        help="Local Ollama API generate endpoint",
-    )
-    parser.add_argument(
         "--timeout",
         type=float,
         default=300.0,
@@ -171,7 +166,6 @@ def main(args_list: Optional[list] = None) -> int:
         result_json_str = query_ollama_structured_api(
             prompt=prompt,
             model=args.model,
-            endpoint=args.endpoint,
             timeout=args.timeout,
         )
     except Exception as e:

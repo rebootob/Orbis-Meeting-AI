@@ -34,6 +34,6 @@
 - **AC-08:** stdout contains raw model response string only (no log lines, prefixes, or markdown formatting).
 - **AC-09:** Failures write to stderr and return non-zero exit code.
 - **AC-10:** No live network requirement in automated unit tests (HTTP boundary mocked).
-- **AC-11:** Existing regression suite passes cleanly (192 tests).
+- **AC-11:** Existing regression suite passes cleanly (195 tests).
 - **AC-12:** Runtime configuration works via `ORBIS_SUMMARY_COMMAND_JSON` + `LocalCommandSummaryProvider`.
 - **AC-13:** No V1 scope expansion.
